@@ -606,6 +606,35 @@ bool Builder::AlreadyUpToDate() const {
   return !plan_.more_to_do();
 }
 
+bool Builder::ConsiderReinstantiatingTargets(Edge* edge, string* err) {
+  if (edge->rule().depfile().empty())
+    return true;
+
+  assert (!edge->outputs_ready());
+
+  //TODO: check dep file mtime!
+  //mk edge->Dump("** Considered Edge specifies depfile, reloading: ");
+  if (!edge->RecomputeDirty(state_, disk_interface_, err)) {
+    return false;
+  }
+
+  for (vector<Node*>::iterator t = edge->inputs_.begin();
+       t != edge->inputs_.end(); ++t) {
+    //TODO: consider re-adding only dirty inputs
+    if (!plan_.AddTarget(*t, err)) {
+      if (!err->empty()) {
+        printf("** FAILED adding taget to plan?\n");
+        return false;
+      }
+    }else{
+      //mk (*t)->Dump("$$ Actually added a new input target to the plan: ");
+      // Update the number of reported plan edges:
+      status_->PlanHasTotalEdges(plan_.command_edge_count());
+    }
+  }
+  return true;
+}
+
 bool Builder::Build(string* err) {
   assert(!AlreadyUpToDate());
 
@@ -628,10 +657,22 @@ bool Builder::Build(string* err) {
   // Second, we attempt to wait for / reap the next finished command.
   // If we can do neither of those, the build is stuck, and we report
   // an error.
+  //mk printf("\n============ Starting build loop ==============\n");
   while (plan_.more_to_do()) {
     // See if we can start any more commands.
     if (failures_allowed && command_runner_->CanRunMore()) {
       if (Edge* edge = plan_.FindWork()) {
+        //Re-instantiate target to reload dep files and recalc deps:
+        if (!ConsiderReinstantiatingTargets(edge, err) && !err->empty()) {
+          status_->BuildFinished();
+          return false;
+        }
+        // Target deps list could get extended, in which case it can get unready.
+        if (!edge->AllInputsReady()) {
+          //mk edge->Dump("$$ Edge dirty deps were discovered: ");
+          continue;
+        }
+
         if (!StartEdge(edge, err)) {
           status_->BuildFinished();
           return false;

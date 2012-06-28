@@ -139,6 +139,7 @@ struct Builder {
 
   bool StartEdge(Edge* edge, string* err);
   void FinishEdge(Edge* edge, bool success, const string& output);
+  bool ConsiderReinstantiatingTargets(Edge* edge, string* err);
 
   State* state_;
   const BuildConfig& config_;

@@ -317,8 +317,11 @@ bool Edge::LoadDepFile(State* state, DiskInterface* disk_interface,
       // to avoid a potential stuck build.  If we do call RecomputeDirty for
       // this node, it will simply set outputs_ready_ to the correct value.
       phony_edge->outputs_ready_ = true;
+      //mk phony_edge->Dump("** Created a phony edge: ");
     }
   }
+
+  //mk this->Dump("** Edge after reading deps: ");
 
   return true;
 }
