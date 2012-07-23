@@ -607,13 +607,15 @@ bool Builder::AlreadyUpToDate() const {
 }
 
 bool Builder::ConsiderReinstantiatingTargets(Edge* edge, string* err) {
+  // Edge should have depfile for reinstantiation to make sense.
   if (edge->rule().depfile().empty())
-    return true;
+    return false;
 
-  assert (!edge->outputs_ready());
+  //mk
+  edge->Dump("** Considered Edge specifies depfile, reloading: ");
 
-  //TODO: check dep file mtime!
-  //mk edge->Dump("** Considered Edge specifies depfile, reloading: ");
+  //TODO: check dep file mtime???
+
   if (!edge->RecomputeDirty(state_, disk_interface_, err)) {
     return false;
   }
@@ -627,11 +629,20 @@ bool Builder::ConsiderReinstantiatingTargets(Edge* edge, string* err) {
         return false;
       }
     }else{
-      //mk (*t)->Dump("$$ Actually added a new input target to the plan: ");
+      //mk
+      (*t)->Dump("$$ Actually added a new input target to the plan: ");
       // Update the number of reported plan edges:
       status_->PlanHasTotalEdges(plan_.command_edge_count());
     }
   }
+
+  if (edge->AllInputsReady()) {
+    return false;
+  }
+
+  //mk
+  // Target deps list got extended, target is now dirty...
+  edge->Dump("$$ Edge dirty deps were discovered: ");
   return true;
 }
 
@@ -657,11 +668,13 @@ bool Builder::Build(string* err) {
   // Second, we attempt to wait for / reap the next finished command.
   // If we can do neither of those, the build is stuck, and we report
   // an error.
-  //mk printf("\n============ Starting build loop ==============\n");
+  //mk
+  printf("\n============ Starting build loop ==============\n");
   while (plan_.more_to_do()) {
     // See if we can start any more commands.
     if (failures_allowed && command_runner_->CanRunMore()) {
       if (Edge* edge = plan_.FindWork()) {
+#if 0
         //Re-instantiate target to reload dep files and recalc deps:
         if (!ConsiderReinstantiatingTargets(edge, err) && !err->empty()) {
           status_->BuildFinished();
@@ -672,7 +685,7 @@ bool Builder::Build(string* err) {
           //mk edge->Dump("$$ Edge dirty deps were discovered: ");
           continue;
         }
-
+#endif
         if (!StartEdge(edge, err)) {
           status_->BuildFinished();
           return false;
@@ -696,7 +709,23 @@ bool Builder::Build(string* err) {
       if (edge && status != ExitInterrupted) {
         bool success = (status == ExitSuccess);
         --pending_commands;
-        FinishEdge(edge, success, output);
+
+        //TODO: iff reevaluate=1
+        //Re-load dep file and recalc deps, re-adding the target to plan
+        // if new *dirty* deps were discovered.
+        //TODO: What to do with the race between building .h and evaluating deps? Safe build?
+        string e, *err = &e;
+        if (!ConsiderReinstantiatingTargets(edge, err)) {
+          if( !err->empty()) {
+            status_->BuildFinished();
+            return false;
+          }
+          FinishEdge(edge, success, output);
+        }else{
+          int start_time, end_time;
+          status_->BuildEdgeFinished(edge, success, output, &start_time, &end_time);
+        }
+
         if (!success) {
           if (failures_allowed)
             failures_allowed--;
