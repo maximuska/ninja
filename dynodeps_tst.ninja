@@ -1,0 +1,38 @@
+rule LD
+    command = gcc $in -o $out
+
+rule CC
+    depfile = $out.d
+    command = gcc -c $in -o $out
+
+rule GENH
+    command = echo $code > $out
+
+rule GENC
+    command = echo $code > $out
+
+rule DEP
+    command = gcc -MM -MG $in -MF $out -MT $out $dep_options
+    depfile = $out
+    reload = 1
+
+build auto.o: CC auto.c | auto.d
+
+build auto.d: DEP auto.c
+    dep_options =
+
+build auto.c: GENC
+    code = '#include "auto2.h"' "\n" 'int main() { return R+L; }' "\n"
+
+build auto2.h: GENH
+    code = '#include "auto1.h"' "\n" '#include "auto1a.h"' "\n"
+
+build auto1.h: GENH
+    code = '#define R 1' "\n"
+
+build auto1a.h: GENH
+    code = '#define L 1' "\n"
+
+build auto: LD auto.o  | auto1a.h
+
+default auto 
