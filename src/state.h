@@ -51,8 +51,9 @@ struct State {
   /// state where we haven't yet examined the disk for dirty state.
   void Reset();
 
-  /// Dump the nodes (useful for debugging).
+  /// Dump the nodes, edges (useful for debugging).
   void Dump();
+  void DumpEdges() const;
 
   /// @return the root node(s) of the graph. (Root nodes have no output edges).
   /// @param error where to write the error message if somethings went wrong.

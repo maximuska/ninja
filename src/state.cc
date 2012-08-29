@@ -147,3 +147,10 @@ void State::Dump() {
                                 : "unknown");
   }
 }
+
+void State::DumpEdges() const {
+  // Dump state edges
+  for (vector<Edge*>::const_iterator e = edges_.begin(); e != edges_.end(); ++e)
+    (*e)->Dump("State:");
+  printf("Total edges: %u\n", edges_.size());
+}

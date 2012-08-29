@@ -211,6 +211,10 @@ struct BuildTest : public StateTestWithBuiltinRules,
     return config;
   }
 
+  bool MkDepCmd(const Edge* edge);
+
+  void DumpCommandsRan() const;
+
   BuildConfig config_;
   Builder builder_;
   int now_;
@@ -237,6 +241,34 @@ bool BuildTest::CanRunMore() {
   return last_command_ == NULL;
 }
 
+bool BuildTest::MkDepCmd(const Edge* edge)
+{
+    // if (edge->outputs_.size() != 1 || edge->inputs_.size() != 1) {
+    //   printf("dep rule requires exactly one output and one input\n");
+    //   return false;
+    // }
+  string err;
+  const string& out_path = edge->outputs_[0]->path();
+  string in_path = edge->inputs_[0]->path();
+  string deps = out_path + ": " + in_path;
+
+  // Read input file. If its content starts with '%' then
+  //  treat the following symbols as an included file path.
+  //  Update 'depfile' and repeat with the 'included' path.
+  for(;;) {
+    string content = fs_.ReadFile(in_path, &err);
+    if (!err.empty())
+      return false;
+    if (content.find('%') != 0)
+      break;
+    in_path = content.substr(1);
+    deps += " " + in_path;
+  }
+  fs_.Create(out_path, now_, deps);
+  printf("Created a dep file: %s\n", deps.c_str());
+  return true;
+}
+
 bool BuildTest::StartCommand(Edge* edge) {
   assert(!last_command_);
   commands_ran_.push_back(edge->EvaluateCommand());
@@ -249,12 +281,20 @@ bool BuildTest::StartCommand(Edge* edge) {
          out != edge->outputs_.end(); ++out) {
       fs_.Create((*out)->path(), now_, "");
     }
+  } else if (edge->rule().name() == "GEN") {
+    for (vector<Node*>::iterator out = edge->outputs_.begin();
+         out != edge->outputs_.end(); ++out) {
+      fs_.Create((*out)->path(), now_, edge->env_->LookupVariable("content"));
+    }
+  } else if (edge->rule().name() == "MKDEP") {
+    if (!MkDepCmd(edge))
+      return false;
   } else if (edge->rule().name() == "true" ||
              edge->rule().name() == "fail" ||
              edge->rule().name() == "interrupt") {
     // Don't do anything.
   } else {
-    printf("unknown command\n");
+    printf("unknown command. rule: %s\n", edge->rule().name().c_str());
     return false;
   }
 
@@ -290,6 +330,12 @@ vector<Edge*> BuildTest::GetActiveEdges() {
 
 void BuildTest::Abort() {
   last_command_ = NULL;
+}
+
+void BuildTest::DumpCommandsRan() const {
+  for (vector<string>::const_iterator i = commands_ran_.begin();
+       i != commands_ran_.end(); ++i)
+    printf("Executed: %s\n", (*i).c_str());
 }
 
 TEST_F(BuildTest, NoWork) {
@@ -1083,4 +1129,89 @@ TEST_F(BuildTest, PhonyWithNoInputs) {
 TEST_F(BuildTest, StatusFormatReplacePlaceholder) {
   EXPECT_EQ("[%/s0/t0/r0/u0/f0]",
             status_.FormatProgressStatus("[%%/s%s/t%t/r%r/u%u/f%f]"));
+}
+
+TEST_F(BuildTest, DepFileReload) {
+  string err;
+  state_ = State(); //blank state
+  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
+"rule GEN\n"
+"  command = echo $content > $out\n"
+"rule MKDEP\n"
+"  command = MkDepCmd -o $out $in\n"
+"  depfile = $out\n"
+"  reload = 1\n"
+"rule cc\n"
+"  command = cc -o $out $in\n"
+""
+"build auto.h: GEN\n"
+"  content = #define x\n"
+"build auto.c: GEN\n"
+"  content = %auto.h\n"
+"build auto.o.dd: MKDEP auto.c\n"
+"build auto.o: cc auto.c | auto.o.dd\n"));
+
+  EXPECT_TRUE(builder_.AddTarget("auto.o", &err));
+  ASSERT_EQ("", err);
+  ASSERT_EQ(3, builder_.plan_.command_edge_count()); // auto.{o,c,o.dd}
+  ASSERT_EQ(4, state_.edges_.size());
+
+  EXPECT_TRUE(builder_.Build(&err));
+  EXPECT_EQ("", err);
+
+  ASSERT_EQ(5u, commands_ran_.size()); // 4 edges + 'auto.o.dd' restarted once
+
+  // Check that auto.o.dd depends now on auto.h
+  vector<Node*>& ddeps = GetNode("auto.o.dd")->in_edge()->inputs_;
+  if (find(ddeps.begin(), ddeps.end(), GetNode("auto.h")) == ddeps.end())
+    FAIL();
+
+  // Finally, verify that expected content was built
+  EXPECT_EQ("auto.o.dd: auto.c auto.h", fs_.ReadFile("auto.o.dd", &err));
+  EXPECT_EQ("#define x", fs_.ReadFile("auto.h", &err));
+}
+
+TEST_F(BuildTest, DepFileReloadNested) {
+  string err;
+  state_ = State(); //blank state
+  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
+"rule GEN\n"
+"  command = echo $content > $out\n"
+"rule MKDEP\n"
+"  command = MkDepCmd -o $out $in\n"
+"  depfile = $out\n"
+"  reload = 1\n"
+"rule cc\n"
+"  command = cc -o $out $in\n"
+""
+"build config.h: GEN\n"
+"  content = #define x\n"
+"build auto.h: GEN\n"
+"  content = %config.h\n"
+"build auto.c: GEN\n"
+"  content = %auto.h\n"
+"build auto.o.dd: MKDEP auto.c\n"
+"build auto.o: cc auto.c | auto.o.dd\n"));
+
+  EXPECT_TRUE(builder_.AddTarget("auto.o", &err));
+  ASSERT_EQ("", err);
+  ASSERT_EQ(3, builder_.plan_.command_edge_count()); // auto.{o,c,o.dd}
+  ASSERT_EQ(5, state_.edges_.size());
+
+  EXPECT_TRUE(builder_.Build(&err));
+  EXPECT_EQ("", err);
+
+  ASSERT_EQ(7u, commands_ran_.size()); // 5 edges + 'auto.o.dd' restarted twice
+
+  // Check that auto.o.dd depends now on auto.h and config.h
+  vector<Node*>& ddeps = GetNode("auto.o.dd")->in_edge()->inputs_;
+  if (find(ddeps.begin(), ddeps.end(), GetNode("auto.h")) == ddeps.end())
+    FAIL();
+  if (find(ddeps.begin(), ddeps.end(), GetNode("config.h")) == ddeps.end())
+    FAIL();
+
+  // Finally, verify that expected content was built
+  EXPECT_EQ("auto.o.dd: auto.c auto.h config.h", fs_.ReadFile("auto.o.dd", &err));
+  EXPECT_EQ("%config.h", fs_.ReadFile("auto.h", &err));
+  EXPECT_EQ("#define x", fs_.ReadFile("config.h", &err));
 }
