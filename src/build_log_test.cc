@@ -30,6 +30,8 @@ const char kTestFilename[] = "BuildLogTest-tempfile";
 
 struct BuildLogTest : public StateTestWithBuiltinRules {
   virtual void SetUp() {
+    // In case a crashing test left a stale file behind.
+    unlink(kTestFilename);
   }
   virtual void TearDown() {
     unlink(kTestFilename);
@@ -53,8 +55,8 @@ TEST_F(BuildLogTest, WriteRead) {
   EXPECT_TRUE(log2.Load(kTestFilename, &err));
   ASSERT_EQ("", err);
 
-  ASSERT_EQ(2u, log1.log().size());
-  ASSERT_EQ(2u, log2.log().size());
+  ASSERT_EQ(2u, log1.entries().size());
+  ASSERT_EQ(2u, log2.entries().size());
   BuildLog::LogEntry* e1 = log1.LookupByOutput("out");
   ASSERT_TRUE(e1);
   BuildLog::LogEntry* e2 = log2.LookupByOutput("out");

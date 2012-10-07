@@ -17,6 +17,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <functional>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -24,6 +25,10 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
+#endif
+
+#if defined(__SVR4) && defined(__sun)
+#include <sys/termios.h>
 #endif
 
 #include "build_log.h"
@@ -34,13 +39,51 @@
 #include "subprocess.h"
 #include "util.h"
 
+namespace {
+
+/// A CommandRunner that doesn't actually run the commands.
+class DryRunCommandRunner : public CommandRunner {
+ public:
+  virtual ~DryRunCommandRunner() {}
+
+  // Overridden from CommandRunner:
+  virtual bool CanRunMore();
+  virtual bool StartCommand(Edge* edge);
+  virtual Edge* WaitForCommand(ExitStatus* status, string* /* output */);
+
+ private:
+  queue<Edge*> finished_;
+};
+
+bool DryRunCommandRunner::CanRunMore() {
+  return true;
+}
+
+bool DryRunCommandRunner::StartCommand(Edge* edge) {
+  finished_.push(edge);
+  return true;
+}
+
+Edge* DryRunCommandRunner::WaitForCommand(ExitStatus* status,
+                                          string* /*output*/) {
+   if (finished_.empty()) {
+     *status = ExitFailure;
+     return NULL;
+   }
+   *status = ExitSuccess;
+   Edge* edge = finished_.front();
+   finished_.pop();
+   return edge;
+}
+
+}  // namespace
+
 BuildStatus::BuildStatus(const BuildConfig& config)
     : config_(config),
       start_time_millis_(GetTimeMillis()),
       started_edges_(0), finished_edges_(0), restarted_edges_(0), total_edges_(0),
       have_blank_line_(true), progress_status_format_(NULL),
-      overall_rate_(), current_rate_(),
-      current_rate_average_count_(config.parallelism) {
+      overall_rate_(), current_rate_(config.parallelism) {
 #ifndef _WIN32
   const char* term = getenv("TERM");
   smart_terminal_ = isatty(1) && term && string(term) != "dumb";
@@ -141,7 +184,8 @@ void BuildStatus::BuildFinished() {
     printf("\n");
 }
 
-string BuildStatus::FormatProgressStatus(const char* progress_status_format) const {
+string BuildStatus::FormatProgressStatus(
+    const char* progress_status_format) const {
   string out;
   char buf[32];
   for (const char* s = progress_status_format; *s != '\0'; ++s) {
@@ -182,29 +226,23 @@ string BuildStatus::FormatProgressStatus(const char* progress_status_format) con
         out += buf;
         break;
 
-      // Overall finished edges per second.
+        // Overall finished edges per second.
       case 'o':
-        overall_rate_.UpdateRate(finished_edges_, finished_edges_);
-        overall_rate_.snprinfRate(buf, "%.1f");
+        overall_rate_.UpdateRate(finished_edges_);
+        snprinfRate(overall_rate_.rate(), buf, "%.1f");
         out += buf;
         break;
 
-      // Current rate, average over the last '-j' jobs.
+        // Current rate, average over the last '-j' jobs.
       case 'c':
-        // TODO use sliding window?
-        if (finished_edges_ > current_rate_.last_update() &&
-            finished_edges_ - current_rate_.last_update() == current_rate_average_count_) {
-          current_rate_.UpdateRate(current_rate_average_count_, finished_edges_);
-          current_rate_.Restart();
-        }
-        current_rate_.snprinfRate(buf, "%.0f");
+        current_rate_.UpdateRate(finished_edges_);
+        snprinfRate(current_rate_.rate(), buf, "%.1f");
         out += buf;
         break;
 
-      default: {
+      default:
         Fatal("unknown placeholder '%%%c' in $NINJA_STATUS", *s);
         return "";
-      }
       }
     } else {
       out.push_back(*s);
@@ -415,7 +453,7 @@ void Plan::NodeFinished(Node* node) {
   }
 }
 
-void Plan::CleanNode(BuildLog* build_log, Node* node) {
+void Plan::CleanNode(DependencyScan* scan, Node* node) {
   node->set_dirty(false);
 
   for (vector<Edge*>::const_iterator ei = node->out_edges().begin();
@@ -431,10 +469,11 @@ void Plan::CleanNode(BuildLog* build_log, Node* node) {
                             end = (*ei)->inputs_.end() - (*ei)->order_only_deps_;
     if (find_if(begin, end, mem_fun(&Node::dirty)) == end) {
       // Recompute most_recent_input and command.
-      TimeStamp most_recent_input = 1;
-      for (vector<Node*>::iterator ni = begin; ni != end; ++ni)
-        if ((*ni)->mtime() > most_recent_input)
-          most_recent_input = (*ni)->mtime();
+      Node* most_recent_input = NULL;
+      for (vector<Node*>::iterator ni = begin; ni != end; ++ni) {
+        if (!most_recent_input || (*ni)->mtime() > most_recent_input->mtime())
+          most_recent_input = *ni;
+      }
       string command = (*ei)->EvaluateCommand(true);
 
       // Now, recompute the dirty state of each output.
@@ -444,12 +483,12 @@ void Plan::CleanNode(BuildLog* build_log, Node* node) {
         if (!(*ni)->dirty())
           continue;
 
-        if ((*ei)->RecomputeOutputDirty(build_log, most_recent_input, NULL, command,
-                                        *ni)) {
+        if (scan->RecomputeOutputDirty(*ei, most_recent_input,
+                                       command, *ni)) {
           (*ni)->MarkDirty();
           all_outputs_clean = false;
         } else {
-          CleanNode(build_log, *ni);
+          CleanNode(scan, *ni);
         }
       }
 
@@ -537,35 +576,11 @@ Edge* RealCommandRunner::WaitForCommand(ExitStatus* status, string* output) {
   return edge;
 }
 
-/// A CommandRunner that doesn't actually run the commands.
-struct DryRunCommandRunner : public CommandRunner {
-  virtual ~DryRunCommandRunner() {}
-  virtual bool CanRunMore() {
-    return true;
-  }
-  virtual bool StartCommand(Edge* edge) {
-    finished_.push(edge);
-    return true;
-  }
-  virtual Edge* WaitForCommand(ExitStatus* status, string* /* output */) {
-    if (finished_.empty()) {
-      *status = ExitFailure;
-      return NULL;
-    }
-    *status = ExitSuccess;
-    Edge* edge = finished_.front();
-    finished_.pop();
-    return edge;
-  }
-
-  queue<Edge*> finished_;
-};
-
 Builder::Builder(State* state, const BuildConfig& config,
-                 DiskInterface* disk_interface)
-    : state_(state), config_(config), disk_interface_(disk_interface) {
+                 BuildLog* log, DiskInterface* disk_interface)
+    : state_(state), config_(config), disk_interface_(disk_interface),
+      scan_(state, log, disk_interface) {
   status_ = new BuildStatus(config);
-  log_ = state->build_log_;
 }
 
 Builder::~Builder() {
@@ -613,7 +628,7 @@ Node* Builder::AddTarget(const string& name, string* err) {
 bool Builder::AddTarget(Node* node, string* err) {
   node->StatIfNecessary(disk_interface_);
   if (Edge* in_edge = node->in_edge()) {
-    if (!in_edge->RecomputeDirty(state_, disk_interface_, err))
+    if (!scan_.RecomputeDirty(in_edge, err))
       return false;
     if (in_edge->outputs_ready())
       return true;  // Nothing to do.
@@ -635,7 +650,7 @@ bool Builder::ConsiderRestartingEdge(Edge* edge, bool success, const string& out
   if (!edge->HasDepFile() or !success)
     return false;
 
-  if (!edge->RecomputeDirty(state_, disk_interface_, err)) {
+  if (!scan_.RecomputeDirty(edge, err)) {
     return false;
   }
 
@@ -819,7 +834,7 @@ void Builder::FinishEdge(Edge* edge, bool success, const string& output) {
           // The rule command did not change the output.  Propagate the clean
           // state through the build graph.
           // Note that this also applies to nonexistent outputs (mtime == 0).
-          plan_.CleanNode(log_, *i);
+          plan_.CleanNode(&scan_, *i);
           node_cleaned = true;
         }
       }
@@ -858,7 +873,7 @@ void Builder::FinishEdge(Edge* edge, bool success, const string& output) {
 
   int start_time, end_time;
   status_->BuildEdgeFinished(edge, success, output, &start_time, &end_time);
-  if (success && log_)
-    log_->RecordCommand(edge, start_time, end_time, restat_mtime);
+  if (success && scan_.build_log())
+    scan_.build_log()->RecordCommand(edge, start_time, end_time, restat_mtime);
 }
 

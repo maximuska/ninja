@@ -178,7 +178,8 @@ TEST_F(PlanTest, DependencyCycle) {
 
 struct BuildTest : public StateTestWithBuiltinRules,
                    public CommandRunner {
-  BuildTest() : config_(MakeConfig()), builder_(&state_, config_, &fs_),
+  BuildTest() : config_(MakeConfig()),
+                builder_(&state_, config_, NULL, &fs_),
                 now_(1), last_command_(NULL), status_(config_) {
     builder_.command_runner_.reset(this);
     AssertParse(&state_,
@@ -754,7 +755,7 @@ TEST_F(BuildTest, SwallowFailuresLimit) {
 
 struct BuildWithLogTest : public BuildTest {
   BuildWithLogTest() {
-    state_.build_log_ = builder_.log_ = &build_log_;
+    builder_.SetBuildLog(&build_log_);
   }
 
   BuildLog build_log_;
@@ -979,7 +980,7 @@ TEST_F(BuildDryRun, AllCommandsShown) {
 }
 
 // Test that RSP files are created when & where appropriate and deleted after
-// succesful execution.
+// successful execution.
 TEST_F(BuildTest, RspFileSuccess)
 {
   ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,

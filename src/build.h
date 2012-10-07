@@ -23,6 +23,7 @@
 #include <memory>
 #include <cstdio>
 
+#include "graph.h"  // XXX needed for DependencyScan; should rearrange.
 #include "exit_status.h"
 #include "metrics.h"
 #include "util.h"  // int64_t
@@ -59,7 +60,7 @@ struct Plan {
   void EdgeFinished(Edge* edge);
 
   /// Clean the given node during the build.
-  void CleanNode(BuildLog* build_log, Node* node);
+  void CleanNode(DependencyScan* scan, Node* node);
 
   /// Number of edges with commands to run.
   int command_edge_count() const { return command_edges_; }
@@ -120,7 +121,7 @@ struct BuildConfig {
 /// Builder wraps the build process: starting commands, updating status.
 struct Builder {
   Builder(State* state, const BuildConfig& config,
-          DiskInterface* disk_interface);
+          BuildLog* log, DiskInterface* disk_interface);
   ~Builder();
 
   /// Clean up after interrupted commands by deleting output files.
@@ -144,15 +145,20 @@ struct Builder {
   bool ConsiderRestartingEdge(Edge* edge, bool success, const string& output,
                               string* err);
 
+  /// Used for tests.
+  void SetBuildLog(BuildLog* log) {
+    scan_.set_build_log(log);
+  }
+
   State* state_;
   const BuildConfig& config_;
   Plan plan_;
   auto_ptr<CommandRunner> command_runner_;
   BuildStatus* status_;
-  BuildLog* log_;
 
  private:
   DiskInterface* disk_interface_;
+  DependencyScan scan_;
 
   // Unimplemented copy ctor and operator= ensure we don't copy the auto_ptr.
   Builder(const Builder &other);        // DO NOT IMPLEMENT
@@ -197,38 +203,56 @@ struct BuildStatus {
   /// The custom progress status format to use.
   const char* progress_status_format_;
 
+  template<size_t S>
+  void snprinfRate(double rate, char(&buf)[S], const char* format) const {
+    if (rate == -1) snprintf(buf, S, "?");
+    else            snprintf(buf, S, format, rate);
+  }
+
   struct RateInfo {
-    RateInfo() : last_update_(0), rate_(-1) {}
+    RateInfo() : rate_(-1) {}
 
-    double rate() const { return rate_; }
-    int last_update() const { return last_update_; }
-    void Restart() { return stopwatch_.Restart(); }
+    void Restart() { stopwatch_.Restart(); }
+    double rate() { return rate_; }
 
-    double UpdateRate(int edges, int update_hint) {
-      if (update_hint != last_update_) {
-        rate_ = edges / stopwatch_.Elapsed() + 0.5;
-        last_update_ = update_hint;
-      }
-      return rate_;
-    }
-
-    template<class T>
-    void snprinfRate(T buf, const char* format) {
-      if (rate_ == -1)
-        snprintf(buf, sizeof(buf), "?");
-      else
-        snprintf(buf, sizeof(buf), format, rate_);
+    void UpdateRate(int edges) {
+      if (edges && stopwatch_.Elapsed())
+        rate_ = edges / stopwatch_.Elapsed();
     }
 
   private:
-    Stopwatch stopwatch_;
-    int last_update_;
     double rate_;
+    Stopwatch stopwatch_;
+  };
+
+  struct SlidingRateInfo {
+    SlidingRateInfo(int n) : rate_(-1), N(n), last_update_(-1) {}
+
+    void Restart() { stopwatch_.Restart(); }
+    double rate() { return rate_; }
+
+    void UpdateRate(int update_hint) {
+      if (update_hint == last_update_)
+        return;
+      last_update_ = update_hint;
+
+      if (times_.size() == N)
+        times_.pop();
+      times_.push(stopwatch_.Elapsed());
+      if (times_.back() != times_.front())
+        rate_ = times_.size() / (times_.back() - times_.front());
+    }
+
+  private:
+    double rate_;
+    Stopwatch stopwatch_;
+    const size_t N;
+    std::queue<double> times_;
+    int last_update_;
   };
 
   mutable RateInfo overall_rate_;
-  mutable RateInfo current_rate_;
-  const int current_rate_average_count_;
+  mutable SlidingRateInfo current_rate_;
 
 #ifdef _WIN32
   void* console_;

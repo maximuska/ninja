@@ -14,6 +14,7 @@
 
 #include "msvc_helper.h"
 
+#include <stdio.h>
 #include <windows.h>
 
 #include "util.h"
@@ -24,9 +25,7 @@ namespace {
 
 void Usage() {
   printf(
-"ninja-msvc-helper: adjust msvc command-line tools for use by ninja.\n"
-"\n"
-"usage: ninja-mvsc-helper [options] -- command args\n"
+"usage: ninja -t msvc [options] -- cl.exe /showIncludes /otherArgs\n"
 "options:\n"
 "  -e ENVFILE load environment block from ENVFILE as environment\n"
 "  -r BASE    normalize paths and make relative to BASE before output\n"
@@ -48,7 +47,7 @@ void PushPathIntoEnvironment(const string& env_block) {
 
 }  // anonymous namespace
 
-int main(int argc, char** argv) {
+int MSVCHelperMain(int argc, char** argv) {
   const char* output_filename = NULL;
   const char* relative_to = NULL;
   const char* envfile = NULL;
@@ -76,8 +75,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (!output_filename)
+  if (!output_filename) {
+    Usage();
     Fatal("-o required");
+  }
 
   string env;
   if (envfile) {
@@ -105,8 +106,8 @@ int main(int argc, char** argv) {
     Fatal("opening %s: %s", depfile.c_str(), GetLastErrorString().c_str());
   }
   fprintf(output, "%s: ", output_filename);
-  for (vector<string>::iterator i = cl.includes_.begin();
-       i != cl.includes_.end(); ++i) {
+  vector<string> headers = cl.GetEscapedResult();
+  for (vector<string>::iterator i = headers.begin(); i != headers.end(); ++i) {
     fprintf(output, "%s\n", i->c_str());
   }
   fclose(output);

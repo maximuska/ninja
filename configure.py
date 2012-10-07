@@ -27,7 +27,7 @@ sys.path.insert(0, 'misc')
 import ninja_syntax
 
 parser = OptionParser()
-platforms = ['linux', 'freebsd', 'mingw', 'windows']
+platforms = ['linux', 'freebsd', 'solaris', 'mingw', 'windows']
 profilers = ['gmon', 'pprof']
 parser.add_option('--platform',
                   help='target platform (' + '/'.join(platforms) + ')',
@@ -45,8 +45,9 @@ parser.add_option('--with-gtest', metavar='PATH',
 parser.add_option('--with-python', metavar='EXE',
                   help='use EXE as the Python interpreter',
                   default=os.path.basename(sys.executable))
-parser.add_option('--with-msvc-helper', metavar='NAME',
-                  help="name for ninja-msvc-helper binary (MSVC only)")
+parser.add_option('--with-ninja', metavar='NAME',
+                  help="name for ninja binary for -t msvc (MSVC only)",
+                  default="ninja")
 (options, args) = parser.parse_args()
 if args:
     print 'ERROR: extra unparsed command-line arguments:', args
@@ -59,6 +60,8 @@ if platform is None:
         platform = 'linux'
     elif platform.startswith('freebsd'):
         platform = 'freebsd'
+    elif platform.startswith('solaris'):
+        platform = 'solaris'
     elif platform.startswith('mingw'):
         platform = 'mingw'
     elif platform.startswith('win'):
@@ -118,6 +121,8 @@ if platform == 'windows':
               '/WX',  # Warnings as errors.
               '/wd4530', '/wd4100', '/wd4706',
               '/wd4512', '/wd4800', '/wd4702', '/wd4819',
+              # Disable warnings about passing "this" during initialization.
+              '/wd4355',
               '/GR-',  # Disable RTTI.
               # Disable size_t -> int truncation warning.
               # We never have strings or arrays larger than 2**31.
@@ -135,9 +140,11 @@ else:
               '-fno-rtti',
               '-fno-exceptions',
               '-fvisibility=hidden', '-pipe',
+              '-Wno-missing-field-initializers',
               '-DNINJA_PYTHON="%s"' % options.with_python]
     if options.debug:
         cflags += ['-D_GLIBCXX_DEBUG', '-D_GLIBCXX_DEBUG_PEDANTIC']
+        cflags.remove('-fno-rtti')  # Needed for above pedanticness.
     else:
         cflags += ['-O2', '-DNDEBUG']
     if 'clang' in os.path.basename(CXX):
@@ -180,8 +187,9 @@ n.newline()
 
 if platform == 'windows':
     compiler = '$cxx'
-    if options.with_msvc_helper:
-        compiler = '%s -o $out -- $cxx /showIncludes' % options.with_msvc_helper
+    if options.with_ninja:
+        compiler = ('%s -t msvc -o $out -- $cxx /showIncludes' %
+                    options.with_ninja)
     n.rule('cxx',
         command='%s $cflags -c $in /Fo$out' % compiler,
         depfile='$out.d',
@@ -219,7 +227,7 @@ n.newline()
 
 objs = []
 
-if platform not in ('mingw', 'windows'):
+if platform not in ('solaris', 'mingw', 'windows'):
     n.comment('browse_py.h is used to inline browse.py.')
     n.rule('inline',
            command='src/inline.sh $varname < $in > $out',
@@ -236,8 +244,8 @@ n.comment('the depfile parser and ninja lexers are generated using re2c.')
 def has_re2c():
     import subprocess
     try:
-        subprocess.call(['re2c', '-v'], stdout=subprocess.PIPE)
-        return True
+        proc = subprocess.Popen(['re2c', '-V'], stdout=subprocess.PIPE)
+        return int(proc.communicate()[0], 10) >= 1103
     except OSError:
         return False
 if has_re2c():
@@ -248,8 +256,8 @@ if has_re2c():
     n.build(src('depfile_parser.cc'), 're2c', src('depfile_parser.in.cc'))
     n.build(src('lexer.cc'), 're2c', src('lexer.in.cc'))
 else:
-    print ("warning: re2c not found; changes to src/*.in.cc will not affect "
-           "your build.")
+    print ("warning: A compatible version of re2c (>= 0.11.3) was not found; "
+           "changes to src/*.in.cc will not affect your build.")
 n.newline()
 
 n.comment('Core source files all build into ninja library.')
@@ -270,10 +278,12 @@ for name in ['build',
              'util']:
     objs += cxx(name)
 if platform in ('mingw', 'windows'):
-    objs += cxx('subprocess-win32')
+    for name in ['subprocess-win32',
+                 'includes_normalize-win32',
+                 'msvc_helper-win32',
+                 'msvc_helper_main-win32']:
+        objs += cxx(name)
     if platform == 'windows':
-        objs += cxx('includes_normalize-win32')
-        objs += cxx('msvc_helper-win32')
         objs += cxx('minidump-win32')
     objs += cc('getopt')
 else:
@@ -297,16 +307,6 @@ ninja = n.build(binary('ninja'), 'link', objs, implicit=ninja_lib,
                 variables=[('libs', libs)])
 n.newline()
 all_targets += ninja
-
-if platform == 'windows':
-    n.comment('Helper for working with MSVC.')
-    msvc_helper = n.build(binary('ninja-msvc-helper'), 'link',
-                          cxx('msvc_helper_main-win32'),
-                          implicit=ninja_lib,
-                          variables=[('libs', libs)])
-    n.default(msvc_helper)
-    n.newline()
-    all_targets += msvc_helper
 
 n.comment('Tests all build into ninja_test executable.')
 
@@ -351,7 +351,7 @@ for name in ['build_log_test',
              'test',
              'util_test']:
     objs += cxx(name, variables=[('cflags', test_cflags)])
-if platform == 'windows':
+if platform in ('windows', 'mingw'):
     for name in ['includes_normalize_test', 'msvc_helper_test']:
         objs += cxx(name, variables=[('cflags', test_cflags)])
 
@@ -364,7 +364,7 @@ n.newline()
 all_targets += ninja_test
 
 
-n.comment('Ancilliary executables.')
+n.comment('Ancillary executables.')
 objs = cxx('parser_perftest')
 all_targets += n.build(binary('parser_perftest'), 'link', objs,
                        implicit=ninja_lib, variables=[('libs', libs)])
@@ -381,7 +381,7 @@ n.newline()
 
 n.comment('Generate a graph using the "graph" tool.')
 n.rule('gendot',
-       command='./ninja -t graph > $out')
+       command='./ninja -t graph all > $out')
 n.rule('gengraph',
        command='dot -Tpng $in > $out')
 dot = n.build(built('graph.dot'), 'gendot', ['ninja', 'build.ninja'])
@@ -429,21 +429,9 @@ n.newline()
 if host == 'linux':
     n.comment('Packaging')
     n.rule('rpmbuild',
-           command="rpmbuild \
-           --define 'ver git' \
-           --define \"rel `git rev-parse --short HEAD`\" \
-           --define '_topdir %(pwd)/rpm-build' \
-           --define '_builddir %{_topdir}' \
-           --define '_rpmdir %{_topdir}' \
-           --define '_srcrpmdir %{_topdir}' \
-           --define '_rpmfilename %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm' \
-           --define '_specdir %{_topdir}' \
-           --define '_sourcedir  %{_topdir}' \
-           --quiet \
-           -bb misc/packaging/ninja.spec",
-           description='Building RPM..')
-    n.build('rpm', 'rpmbuild',
-            implicit=['ninja','README', 'COPYING', doc('manual.html')])
+           command="misc/packaging/rpmbuild.sh",
+           description='Building rpms..')
+    n.build('rpm', 'rpmbuild')
     n.newline()
 
 n.build('all', 'phony', all_targets)
