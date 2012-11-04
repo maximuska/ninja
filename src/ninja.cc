@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <list>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -461,6 +462,72 @@ int ToolCommands(Globals* globals, int argc, char* argv[]) {
   return 0;
 }
 
+int ToolDepends(Globals* globals, int argc, char* argv[]) {
+  if (argc != 2) {
+    Error("usage: ninja -t depends <source> <target>");
+    return 1;
+  }
+
+  string err;
+  RealDiskInterface disk_interface;
+  DependencyScan scan(globals->state, globals->build_log, &disk_interface);
+
+  Node *target = CollectTarget(globals->state, argv[1], &err);
+  if (!target || !scan.RecomputeDirty(target->in_edge(), &err)) {
+    Error("%s", err.c_str());
+    return 1;
+  }
+
+  Node *source = CollectTarget(globals->state, argv[0], &err);
+  if (!source) {
+    Error("%s", err.c_str());
+    return 1;
+  }
+
+  // Are depfiles clean?
+  if (target->dirty()) {
+    printf("warning: target '%s' is dirty, dep files may be incomplete\n",
+           target->path().c_str());
+  }
+
+  // Scan graph in BFS order, deps-only edges excluded
+  std::list<Node*> queue;
+  map<Node*, Node*> seen;
+  queue.push_back(target);
+  seen[target] = NULL;
+  while (!queue.empty()) {
+    Node* leader = queue.front();
+    if (leader == source)
+      break;
+
+    queue.pop_front();
+    if (Edge* in_edge = leader->in_edge()) {
+      for (vector<Node*>::iterator n = in_edge->inputs_.begin();
+           n != in_edge->inputs_.end() - in_edge->order_only_deps_; ++n) {
+        if (!seen.count(*n)) {
+          seen[*n] = leader;
+          queue.push_back(*n);
+        }
+      }
+    }
+  }
+
+  if (queue.empty()) {
+    Error("'%s' does not depend on '%s'",
+          target->path().c_str(), source->path().c_str());
+    return 1;
+  }
+
+  // Print shortest dependency path
+  Node* n = source;
+  while (n != target) {
+    printf("%s -> ", n->path().c_str());
+    n = seen[n];
+  }
+  printf("%s\n", target->path().c_str());
+  return 0;
+}
+
 int ToolClean(Globals* globals, int argc, char* argv[]) {
   // The clean tool uses getopt, and expects argv[0] to contain the name of
   // the tool, i.e. "clean".
@@ -559,7 +626,9 @@ int ChooseTool(const string& tool_name, const Tool** tool_out) {
     { "rules",    "list all rules",
       Tool::RUN_AFTER_LOAD, ToolRules },
     { "targets",  "list targets by their rule or depth in the DAG",
-      Tool::RUN_AFTER_LOAD, ToolTargets },
+      Tool::RUN_AFTER_LOAD, ToolBrowse },
+    { "depends",  "show how target T depends on source S",
+      Tool::RUN_AFTER_LOAD, ToolDepends },
     { "urtle", NULL,
       Tool::RUN_AFTER_FLAGS, ToolUrtle },
     { NULL, NULL, Tool::RUN_AFTER_FLAGS, NULL }
@@ -862,6 +931,7 @@ reload:
   }
 
   Builder builder(globals.state, config, globals.build_log, &disk_interface);
+
   int result = RunBuild(&builder, argc, argv);
   if (g_metrics)
     DumpMetrics(&globals);
