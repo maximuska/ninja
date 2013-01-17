@@ -32,16 +32,41 @@ bool Node::Stat(DiskInterface* disk_interface) {
   return mtime_ > 0;
 }
 
+void Rule::AddBinding(const string& key, const EvalString& val) {
+  bindings_[key] = val;
+}
+
+const EvalString* Rule::GetBinding(const string& key) const {
+  map<string, EvalString>::const_iterator i = bindings_.find(key);
+  if (i == bindings_.end())
+    return NULL;
+  return &i->second;
+}
+
+// static
+bool Rule::IsReservedBinding(const string& var) {
+  return var == "command" ||
+      var == "depfile" ||
+      var == "description" ||
+      var == "generator" ||
+      var == "pool" ||
+      var == "reload" ||
+      var == "restat" ||
+      var == "rspfile" ||
+      var == "rspfile_content";
+}
+
 bool DependencyScan::RecomputeDirty(Edge* edge, string* err) {
   bool dirty = false;
   edge->outputs_ready_ = true;
 
-  if (!edge->rule_->depfile().empty()) {
-    if (!LoadDepFile(edge, err)) {
+  string depfile = edge->GetBinding("depfile");
+  if (!depfile.empty()) {
+    if (!LoadDepFile(edge, depfile, err)) {
       if (!err->empty())
         return false;
       EXPLAIN("Edge targets are dirty because depfile '%s' is missing",
-              edge->EvaluateDepFile().c_str());
+              depfile.c_str());
       dirty = true;
     }
   }
@@ -142,10 +167,11 @@ bool DependencyScan::RecomputeOutputDirty(Edge* edge,
     // build log.  Use that mtime instead, so that the file will only be
     // considered dirty if an input was modified since the previous run.
     TimeStamp most_recent_stamp = most_recent_input->mtime();
-    if (edge->rule_->restat() && build_log() &&
+    if (edge->GetBindingBool("restat") && build_log() &&
         (entry = build_log()->LookupByOutput(output->path()))) {
       if (entry->restat_mtime < most_recent_stamp) {
-        EXPLAIN("restat of output %s older than most recent input %s (%d vs %d)",
+        EXPLAIN("restat of output %s older than most recent input %s "
+                "(%d vs %d)",
             output->path().c_str(), most_recent_input->path().c_str(),
             entry->restat_mtime, most_recent_stamp);
         return true;
@@ -161,7 +187,7 @@ bool DependencyScan::RecomputeOutputDirty(Edge* edge,
   // May also be dirty due to the command changing since the last build.
   // But if this is a generator rule, the command changing does not make us
   // dirty.
-  if (!edge->rule_->generator() && build_log()) {
+  if (!edge->GetBindingBool("generator") && build_log()) {
     if (entry || (entry = build_log()->LookupByOutput(output->path()))) {
       if (BuildLog::LogEntry::HashCommand(command) != entry->command_hash) {
         EXPLAIN("command line changed for %s", output->path().c_str());
@@ -192,7 +218,7 @@ struct EdgeEnv : public Env {
   virtual string LookupVariable(const string& var);
 
   /// Given a span of Nodes, construct a list of paths suitable for a command
-  /// line.  XXX here is where shell-escaping of e.g spaces should happen.
+  /// line.
   string MakePathList(vector<Node*>::iterator begin,
                       vector<Node*>::iterator end,
                       char sep);
@@ -211,12 +237,11 @@ string EdgeEnv::LookupVariable(const string& var) {
     return MakePathList(edge_->outputs_.begin(),
                         edge_->outputs_.end(),
                         ' ');
-  } else if (edge_->env_) {
-    return edge_->env_->LookupVariable(var);
-  } else {
-    // XXX should we warn here?
-    return string();
   }
+
+  // See notes on BindingEnv::LookupWithFallback.
+  const EvalString* eval = edge_->rule_->GetBinding(var);
+  return edge_->env_->LookupWithFallback(var, eval, this);
 }
 
 string EdgeEnv::MakePathList(vector<Node*>::iterator begin,
@@ -239,44 +264,26 @@ string EdgeEnv::MakePathList(vector<Node*>::iterator begin,
 }
 
 string Edge::EvaluateCommand(bool incl_rsp_file) {
-  EdgeEnv env(this);
-  string command = rule_->command().Evaluate(&env);
-  if (incl_rsp_file && HasRspFile()) 
-    command += ";rspfile=" + GetRspFileContent();
+  string command = GetBinding("command");
+  if (incl_rsp_file) {
+    string rspfile_content = GetBinding("rspfile_content");
+    if (!rspfile_content.empty())
+      command += ";rspfile=" + rspfile_content;
+  }
   return command;
 }
 
-string Edge::EvaluateDepFile() {
+string Edge::GetBinding(const string& key) {
   EdgeEnv env(this);
-  return rule_->depfile().Evaluate(&env);
+  return env.LookupVariable(key);
 }
 
-string Edge::GetDescription() {
-  EdgeEnv env(this);
-  return rule_->description().Evaluate(&env);
+bool Edge::GetBindingBool(const string& key) {
+  return !GetBinding(key).empty();
 }
 
-bool Edge::HasRspFile() {
-  return !rule_->rspfile().empty();
-}
-
-string Edge::GetRspFile() {
-  EdgeEnv env(this);
-  return rule_->rspfile().Evaluate(&env);
-}
-
-string Edge::GetRspFileContent() {
-  EdgeEnv env(this);
-  return rule_->rspfile_content().Evaluate(&env);
-}
-
-bool Edge::HasDepFile() const {
-  return !rule_->depfile().empty();
-}
-
-bool DependencyScan::LoadDepFile(Edge* edge, string* err) {
+bool DependencyScan::LoadDepFile(Edge* edge, const string& path, string* err) {
   METRIC_RECORD("depfile load");
-  string path = edge->EvaluateDepFile();
   string content = disk_interface_->ReadFile(path, err);
   if (!err->empty())
     return false;
@@ -349,6 +356,13 @@ void Edge::Dump(const char* prefix) const {
        i != outputs_.end() && *i != NULL; ++i) {
     printf("%s ", (*i)->path().c_str());
   }
+  if (pool_) {
+    if (!pool_->name().empty()) {
+      printf("(in pool '%s')", pool_->name().c_str());
+    }
+  } else {
+    printf("(null pool?)");
+  }
   printf("] 0x%p\n", this);
 }
 
@@ -359,11 +373,11 @@ bool Edge::is_phony() const {
 void Node::Dump(const char* prefix) const {
     printf("%s <%s 0x%p> mtime: %d%s, (:%s), ",
            prefix, path().c_str(), this,
-           mtime(), mtime()?"":" (:missing)",
-           dirty()?" dirty":" clean");
+         mtime(), mtime() ? "" : " (:missing)",
+         dirty() ? " dirty" : " clean");
     if (in_edge()) {
         in_edge()->Dump("in-edge: ");
-    }else{
+  } else {
         printf("no in-edge\n");
     }
     printf(" out edges:\n");

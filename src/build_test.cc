@@ -176,6 +176,132 @@ TEST_F(PlanTest, DependencyCycle) {
   ASSERT_EQ("dependency cycle: out -> mid -> in -> pre -> out", err);
 }
 
+TEST_F(PlanTest, PoolWithDepthOne) {
+  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
+"pool foobar\n"
+"  depth = 1\n"
+"rule poolcat\n"
+"  command = cat $in > $out\n"
+"  pool = foobar\n"
+"build out1: poolcat in\n"
+"build out2: poolcat in\n"));
+  GetNode("out1")->MarkDirty();
+  GetNode("out2")->MarkDirty();
+  string err;
+  EXPECT_TRUE(plan_.AddTarget(GetNode("out1"), &err));
+  ASSERT_EQ("", err);
+  EXPECT_TRUE(plan_.AddTarget(GetNode("out2"), &err));
+  ASSERT_EQ("", err);
+  ASSERT_TRUE(plan_.more_to_do());
+
+  Edge* edge = plan_.FindWork();
+  ASSERT_TRUE(edge);
+  ASSERT_EQ("in",  edge->inputs_[0]->path());
+  ASSERT_EQ("out1", edge->outputs_[0]->path());
+
+  // This will be false since poolcat is serialized
+  ASSERT_FALSE(plan_.FindWork());
+
+  plan_.EdgeFinished(edge);
+
+  edge = plan_.FindWork();
+  ASSERT_TRUE(edge);
+  ASSERT_EQ("in", edge->inputs_[0]->path());
+  ASSERT_EQ("out2", edge->outputs_[0]->path());
+
+  ASSERT_FALSE(plan_.FindWork());
+
+  plan_.EdgeFinished(edge);
+
+  ASSERT_FALSE(plan_.more_to_do());
+  edge = plan_.FindWork();
+  ASSERT_EQ(0, edge);
+}
+
+TEST_F(PlanTest, PoolsWithDepthTwo) {
+  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
+"pool foobar\n"
+"  depth = 2\n"
+"pool bazbin\n"
+"  depth = 2\n"
+"rule foocat\n"
+"  command = cat $in > $out\n"
+"  pool = foobar\n"
+"rule bazcat\n"
+"  command = cat $in > $out\n"
+"  pool = bazbin\n"
+"build out1: foocat in\n"
+"build out2: foocat in\n"
+"build out3: foocat in\n"
+"build outb1: bazcat in\n"
+"build outb2: bazcat in\n"
+"build outb3: bazcat in\n"
+"  pool =\n"
+"build allTheThings: cat out1 out2 out3 outb1 outb2 outb3\n"
+));
+  // Mark all the out* nodes dirty
+  for (int i = 0; i < 3; ++i) {
+    GetNode("out" + string(1, '1' + i))->MarkDirty();
+    GetNode("outb" + string(1, '1' + i))->MarkDirty();
+  }
+  GetNode("allTheThings")->MarkDirty();
+
+  string err;
+  EXPECT_TRUE(plan_.AddTarget(GetNode("allTheThings"), &err));
+  ASSERT_EQ("", err);
+
+  // Grab the first 4 edges, out1 out2 outb1 outb2
+  deque<Edge*> edges;
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(plan_.more_to_do());
+    Edge* edge = plan_.FindWork();
+    ASSERT_TRUE(edge);
+    ASSERT_EQ("in",  edge->inputs_[0]->path());
+    string base_name(i < 2 ? "out" : "outb");
+    ASSERT_EQ(base_name + string(1, '1' + (i % 2)), edge->outputs_[0]->path());
+    edges.push_back(edge);
+  }
+
+  // outb3 is exempt because it has an empty pool
+  ASSERT_TRUE(plan_.more_to_do());
+  Edge* edge = plan_.FindWork();
+  ASSERT_TRUE(edge);
+  ASSERT_EQ("in",  edge->inputs_[0]->path());
+  ASSERT_EQ("outb3", edge->outputs_[0]->path());
+  edges.push_back(edge);
+
+  ASSERT_FALSE(plan_.FindWork());
+
+  // finish out1
+  plan_.EdgeFinished(edges.front());
+  edges.pop_front();
+
+  // out3 should be available
+  Edge* out3 = plan_.FindWork();
+  ASSERT_TRUE(out3);
+  ASSERT_EQ("in",  out3->inputs_[0]->path());
+  ASSERT_EQ("out3", out3->outputs_[0]->path());
+
+  ASSERT_FALSE(plan_.FindWork());
+
+  plan_.EdgeFinished(out3);
+
+  ASSERT_FALSE(plan_.FindWork());
+
+  for (deque<Edge*>::iterator it = edges.begin(); it != edges.end(); ++it) {
+    plan_.EdgeFinished(*it);
+  }
+
+  Edge* final = plan_.FindWork();
+  ASSERT_TRUE(final);
+  ASSERT_EQ("allTheThings", final->outputs_[0]->path());
+
+  plan_.EdgeFinished(final);
+
+  ASSERT_FALSE(plan_.more_to_do());
+  ASSERT_FALSE(plan_.FindWork());
+}
+
 struct BuildTest : public StateTestWithBuiltinRules,
                    public CommandRunner {
   BuildTest() : config_(MakeConfig()),
@@ -484,10 +610,12 @@ TEST_F(BuildTest, MakeDirs) {
   string err;
 
 #ifdef _WIN32
-  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_, "build subdir\\dir2\\file: cat in1\n"));
+  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
+                                      "build subdir\\dir2\\file: cat in1\n"));
   EXPECT_TRUE(builder_.AddTarget("subdir\\dir2\\file", &err));
 #else
-  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_, "build subdir/dir2/file: cat in1\n"));
+  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
+                                      "build subdir/dir2/file: cat in1\n"));
   EXPECT_TRUE(builder_.AddTarget("subdir/dir2/file", &err));
 #endif
 
@@ -1362,7 +1490,6 @@ TEST_F(BuildTest, DepFileReloadWithRsp) {
 "build auto.c: cat\n"
 "  content = %auto.h\n"
 "build auto.o.dd: mkdep auto.c\n"
-"  rspfile = \n"
 "  long_command = Long Long Long command\n"
 "build auto.o: cc auto.c | auto.o.dd\n"));
 

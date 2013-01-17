@@ -82,6 +82,16 @@ bool Cleaner::IsAlreadyRemoved(const string& path) {
   return (i != removed_.end());
 }
 
+void Cleaner::RemoveEdgeFiles(Edge* edge) {
+  string depfile = edge->GetBinding("depfile");
+  if (!depfile.empty())
+    Remove(depfile);
+
+  string rspfile = edge->GetBinding("rspfile");
+  if (!rspfile.empty())
+    Remove(rspfile);
+}
+
 void Cleaner::PrintHeader() {
   if (config_.verbosity == BuildConfig::QUIET)
     return;
@@ -107,18 +117,14 @@ int Cleaner::CleanAll(bool generator) {
     if ((*e)->is_phony())
       continue;
     // Do not remove generator's files unless generator specified.
-    if (!generator && (*e)->rule().generator())
+    if (!generator && (*e)->GetBindingBool("generator"))
       continue;
     for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
          out_node != (*e)->outputs_.end(); ++out_node) {
       Remove((*out_node)->path());
     }
-    // Remove the depfile
-    if (!(*e)->rule().depfile().empty())
-      Remove((*e)->EvaluateDepFile());
-    // Remove the response file
-    if ((*e)->HasRspFile()) 
-      Remove((*e)->GetRspFile());      
+
+    RemoveEdgeFiles(*e);
   }
   PrintFooter();
   return status_;
@@ -129,10 +135,7 @@ void Cleaner::DoCleanTarget(Node* target) {
     // Do not try to remove phony targets
     if (!e->is_phony()) {
       Remove(target->path());
-      if (!target->in_edge()->rule().depfile().empty())
-        Remove(target->in_edge()->EvaluateDepFile());
-      if (e->HasRspFile())
-        Remove(e->GetRspFile());
+      RemoveEdgeFiles(e);
     }
     for (vector<Node*>::iterator n = e->inputs_.begin(); n != e->inputs_.end();
          ++n) {
@@ -200,10 +203,7 @@ void Cleaner::DoCleanRule(const Rule* rule) {
       for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
            out_node != (*e)->outputs_.end(); ++out_node) {
         Remove((*out_node)->path());
-        if (!(*e)->rule().depfile().empty())
-          Remove((*e)->EvaluateDepFile());
-        if ((*e)->HasRspFile()) 
-          Remove((*e)->GetRspFile());
+        RemoveEdgeFiles(*e);
       }
     }
   }

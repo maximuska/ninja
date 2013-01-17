@@ -19,6 +19,8 @@
 Projects that use ninja themselves should either write a similar script
 or use a meta-build system that supports Ninja output."""
 
+from __future__ import print_function
+
 from optparse import OptionParser
 import os
 import sys
@@ -50,7 +52,7 @@ parser.add_option('--with-ninja', metavar='NAME',
                   default="ninja")
 (options, args) = parser.parse_args()
 if args:
-    print 'ERROR: extra unparsed command-line arguments:', args
+    print('ERROR: extra unparsed command-line arguments:', args)
     sys.exit(1)
 
 platform = options.platform
@@ -169,7 +171,9 @@ else:
         libs.append('-lprofiler')
 
 def shell_escape(str):
-    """Escape str such that it's interpreted as a single argument by the shell."""
+    """Escape str such that it's interpreted as a single argument by
+    the shell."""
+
     # This isn't complete, but it's just enough to make NINJA_PYTHON work.
     if platform in ('windows', 'mingw'):
       return str
@@ -256,7 +260,7 @@ if has_re2c():
     n.build(src('depfile_parser.cc'), 're2c', src('depfile_parser.in.cc'))
     n.build(src('lexer.cc'), 're2c', src('lexer.in.cc'))
 else:
-    print ("warning: A compatible version of re2c (>= 0.11.3) was not found; "
+    print("warning: A compatible version of re2c (>= 0.11.3) was not found; "
            "changes to src/*.in.cc will not affect your build.")
 n.newline()
 
@@ -311,7 +315,7 @@ all_targets += ninja
 n.comment('Tests all build into ninja_test executable.')
 
 variables = []
-test_cflags = None
+test_cflags = cflags + ['-DGTEST_HAS_RTTI=0']
 test_ldflags = None
 test_libs = libs
 objs = []
@@ -330,13 +334,15 @@ if options.with_gtest:
                     os.path.join(path, 'src', 'gtest_main.cc'),
                     variables=[('cflags', gtest_cflags)])
 
-    test_cflags = cflags + ['-DGTEST_HAS_RTTI=0',
-                            '-I%s' % os.path.join(path, 'include')]
-elif platform == 'windows':
-    test_libs.extend(['gtest_main.lib', 'gtest.lib'])
+    test_cflags.append('-I%s' % os.path.join(path, 'include'))
 else:
-    test_libs.extend(['-lgtest_main', '-lgtest'])
+    # Use gtest from system.
+    if platform == 'windows':
+        test_libs.extend(['gtest_main.lib', 'gtest.lib'])
+    else:
+        test_libs.extend(['-lgtest_main', '-lgtest'])
 
+n.variable('test_cflags', test_cflags)
 for name in ['build_log_test',
              'build_test',
              'clean_test',
@@ -350,7 +356,7 @@ for name in ['build_log_test',
              'subprocess_test',
              'test',
              'util_test']:
-    objs += cxx(name, variables=[('cflags', test_cflags)])
+    objs += cxx(name, variables=[('cflags', '$test_cflags')])
 if platform in ('windows', 'mingw'):
     for name in ['includes_normalize_test', 'msvc_helper_test']:
         objs += cxx(name, variables=[('cflags', test_cflags)])
@@ -436,4 +442,4 @@ if host == 'linux':
 
 n.build('all', 'phony', all_targets)
 
-print 'wrote %s.' % BUILD_FILENAME
+print('wrote %s.' % BUILD_FILENAME)
