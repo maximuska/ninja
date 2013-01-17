@@ -56,7 +56,7 @@ uint64_t MurmurHash64A(const void* key, size_t len) {
   uint64_t h = seed ^ (len * m);
   const uint64_t * data = (const uint64_t *)key;
   const uint64_t * end = data + (len/8);
-  while(data != end) {
+  while (data != end) {
     uint64_t k = *data++;
     k *= m;
     k ^= k >> r;
@@ -65,7 +65,7 @@ uint64_t MurmurHash64A(const void* key, size_t len) {
     h *= m;
   }
   const unsigned char* data2 = (const unsigned char*)data;
-  switch(len & 7)
+  switch (len & 7)
   {
   case 7: h ^= uint64_t(data2[6]) << 48;
   case 6: h ^= uint64_t(data2[5]) << 40;
@@ -163,11 +163,11 @@ void BuildLog::RecordCommand(Edge* edge, int start_time, int end_time,
   // Log implicit targets.
   // Currently only used when cleaning orphan targets, therefore do this
   //  only unless a matching path is already in the log.
-  if (!edge->rule_->depfile().empty()) {
-    const string& path = edge->EvaluateDepFile();
-    if (entries_.count(path) == 0) {
+  const string& depfile = edge->GetBinding("depfile");
+  if (!depfile.empty()) {
+    if (entries_.count(depfile) == 0) {
       LogEntry* log_entry =
-        new LogEntry(path, command_hash, start_time, end_time, restat_mtime);
+        new LogEntry(depfile, command_hash, start_time, end_time, restat_mtime);
       entries_.insert(Entries::value_type(log_entry->output, log_entry));
 
       if (log_file_)
@@ -182,8 +182,7 @@ void BuildLog::Close() {
   log_file_ = NULL;
 }
 
-class LineReader {
- public:
+struct LineReader {
   explicit LineReader(FILE* file)
     : file_(file), buf_end_(buf_), line_start_(buf_), line_end_(NULL) {
       memset(buf_, 0, sizeof(buf_));

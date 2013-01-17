@@ -102,42 +102,29 @@ private:
 
 /// An invokable build command and associated metadata (description, etc.).
 struct Rule {
-  explicit Rule(const string& name)
-      : name_(name), generator_(false), restat_(false) {}
+  explicit Rule(const string& name) : name_(name) {}
 
   const string& name() const { return name_; }
 
-  bool generator() const { return generator_; }
-  bool restat() const { return restat_; }
+  typedef map<string, EvalString> Bindings;
+  void AddBinding(const string& key, const EvalString& val);
 
-  const EvalString& command() const { return command_; }
-  const EvalString& description() const { return description_; }
-  const EvalString& depfile() const { return depfile_; }
-  const EvalString& rspfile() const { return rspfile_; }
-  const EvalString& rspfile_content() const { return rspfile_content_; }
+  static bool IsReservedBinding(const string& var);
 
-  /// Used by a test.
-  void set_command(const EvalString& command) { command_ = command; }
+  const EvalString* GetBinding(const string& key) const;
 
  private:
   // Allow the parsers to reach into this object and fill out its fields.
   friend struct ManifestParser;
 
   string name_;
-
-  bool generator_;
-  bool restat_;
-
-  EvalString command_;
-  EvalString description_;
-  EvalString depfile_;
-  EvalString rspfile_;
-  EvalString rspfile_content_;
+  map<string, EvalString> bindings_;
 };
 
 struct BuildLog;
 struct Node;
 struct State;
+struct Pool;
 
 /// An edge in the dependency graph; links between Nodes using Rules.
 struct Edge {
@@ -150,41 +137,33 @@ struct Edge {
   /// Expand all variables in a command and return it as a string.
   /// If incl_rsp_file is enabled, the string will also contain the
   /// full contents of a response file (if applicable)
-  string EvaluateCommand(bool incl_rsp_file = false);  // XXX move to env, take env ptr
-  string EvaluateDepFile();
-  string GetDescription();
+  string EvaluateCommand(bool incl_rsp_file = false);
 
-  /// Does the edge use a response file?
-  bool HasRspFile();
-
-  /// Get the path to the response file
-  string GetRspFile();
-
-  /// Get the contents of the response file
-  string GetRspFileContent();
+  string GetBinding(const string& key);
+  bool GetBindingBool(const string& key);
 
   void Dump(const char* prefix="") const;
 
   const Rule* rule_;
+  Pool* pool_;
   vector<Node*> inputs_;
   vector<Node*> outputs_;
-  Env* env_;
+  BindingEnv* env_;
   bool outputs_ready_;
 
   const Rule& rule() const { return *rule_; }
+  Pool* pool() const { return pool_; }
+  int weight() const { return 1; }
   bool outputs_ready() const { return outputs_ready_; }
 
-  // XXX There are three types of inputs.
+  // There are three types of inputs.
   // 1) explicit deps, which show up as $in on the command line;
   // 2) implicit deps, which the target depends on implicitly (e.g. C headers),
   //                   and changes in them cause the target to rebuild;
   // 3) order-only deps, which are needed before the target builds but which
   //                     don't cause the target to rebuild.
-  // Currently we stuff all of these into inputs_ and keep counts of #2 and #3
-  // when we need to compute subsets.  This is suboptimal; should think of a
-  // better representation.  (Could make each pointer into a pair of a pointer
-  // and a type of input, or if memory matters could use the low bits of the
-  // pointer...)
+  // These are stored in inputs_ in that order, and we keep counts of
+  // #2 and #3 when we need to access the various subsets.
   int implicit_deps_;
   int order_only_deps_;
   bool is_implicit(size_t index) {
@@ -218,7 +197,7 @@ struct DependencyScan {
   bool RecomputeOutputDirty(Edge* edge, Node* most_recent_input,
                             const string& command, Node* output);
 
-  bool LoadDepFile(Edge* edge, string* err);
+  bool LoadDepFile(Edge* edge, const string& path, string* err);
 
   BuildLog* build_log() const {
     return build_log_;

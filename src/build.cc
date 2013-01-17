@@ -41,8 +41,7 @@
 namespace {
 
 /// A CommandRunner that doesn't actually run the commands.
-class DryRunCommandRunner : public CommandRunner {
- public:
+struct DryRunCommandRunner : public CommandRunner {
   virtual ~DryRunCommandRunner() {}
 
   // Overridden from CommandRunner:
@@ -179,6 +178,7 @@ string BuildStatus::FormatProgressStatus(
     const char* progress_status_format) const {
   string out;
   char buf[32];
+  int percent;
   for (const char* s = progress_status_format; *s != '\0'; ++s) {
     if (*s == '%') {
       ++s;
@@ -231,6 +231,13 @@ string BuildStatus::FormatProgressStatus(
         out += buf;
         break;
 
+        // Percentage
+      case 'p':
+        percent = (100 * started_edges_) / total_edges_;
+        snprintf(buf, sizeof(buf), "%3i%%", percent);
+        out += buf;
+        break;
+
       default:
         Fatal("unknown placeholder '%%%c' in $NINJA_STATUS", *s);
         return "";
@@ -249,9 +256,9 @@ void BuildStatus::PrintStatus(Edge* edge) {
 
   bool force_full_command = config_.verbosity == BuildConfig::VERBOSE;
 
-  string to_print = edge->GetDescription();
+  string to_print = edge->GetBinding("description");
   if (to_print.empty() || force_full_command)
-    to_print = edge->EvaluateCommand();
+    to_print = edge->GetBinding("command");
 
 #ifdef _WIN32
   CONSOLE_SCREEN_BUFFER_INFO csbi;
@@ -359,7 +366,7 @@ bool Plan::AddSubTarget(Node* node, vector<Node*>* stack, string* err) {
     want = true;
     ++wanted_edges_;
     if (edge->AllInputsReady())
-      ready_.insert(edge);
+      ScheduleWork(edge);
     if (!edge->is_phony())
       ++command_edges_;
   }
@@ -408,6 +415,22 @@ Edge* Plan::FindWork() {
   return edge;
 }
 
+void Plan::ScheduleWork(Edge* edge) {
+  Pool* pool = edge->pool();
+  if (pool->ShouldDelayEdge()) {
+    pool->DelayEdge(edge);
+    pool->RetrieveReadyEdges(&ready_);
+  } else {
+    pool->EdgeScheduled(*edge);
+    ready_.insert(edge);
+  }
+}
+
+void Plan::ResumeDelayedJobs(Edge* edge) {
+  edge->pool()->EdgeFinished(*edge);
+  edge->pool()->RetrieveReadyEdges(&ready_);
+}
+
 void Plan::EdgeFinished(Edge* edge) {
   map<Edge*, bool>::iterator i = want_.find(edge);
   assert(i != want_.end());
@@ -415,6 +438,9 @@ void Plan::EdgeFinished(Edge* edge) {
     --wanted_edges_;
   want_.erase(i);
   edge->outputs_ready_ = true;
+
+  // See if this job frees up any delayed jobs
+  ResumeDelayedJobs(edge);
 
   // Check off any nodes we were waiting for with this edge.
   for (vector<Node*>::iterator i = edge->outputs_.begin();
@@ -434,7 +460,7 @@ void Plan::NodeFinished(Node* node) {
     // See if the edge is now ready.
     if ((*i)->AllInputsReady()) {
       if (want_i->second) {
-        ready_.insert(*i);
+        ScheduleWork(*i);
       } else {
         // We do not need to build this edge, but we might need to build one of
         // its dependents.
@@ -456,8 +482,9 @@ void Plan::CleanNode(DependencyScan* scan, Node* node) {
 
     // If all non-order-only inputs for this edge are now clean,
     // we might have changed the dirty state of the outputs.
-    vector<Node*>::iterator begin = (*ei)->inputs_.begin(),
-                            end = (*ei)->inputs_.end() - (*ei)->order_only_deps_;
+    vector<Node*>::iterator
+        begin = (*ei)->inputs_.begin(),
+        end = (*ei)->inputs_.end() - (*ei)->order_only_deps_;
     if (find_if(begin, end, mem_fun(&Node::dirty)) == end) {
       // Recompute most_recent_input and command.
       Node* most_recent_input = NULL;
@@ -585,7 +612,7 @@ void Builder::Cleanup() {
 
     for (vector<Edge*>::iterator i = active_edges.begin();
          i != active_edges.end(); ++i) {
-      bool has_depfile = !(*i)->rule_->depfile().empty();
+      string depfile = (*i)->GetBinding("depfile");
       for (vector<Node*>::iterator ni = (*i)->outputs_.begin();
            ni != (*i)->outputs_.end(); ++ni) {
         // Only delete this output if it was actually modified.  This is
@@ -595,12 +622,13 @@ void Builder::Cleanup() {
         // need to rebuild an output because of a modified header file
         // mentioned in a depfile, and the command touches its depfile
         // but is interrupted before it touches its output file.)
-        if (has_depfile ||
-            (*ni)->mtime() != disk_interface_->Stat((*ni)->path()))
+        if (!depfile.empty() ||
+            (*ni)->mtime() != disk_interface_->Stat((*ni)->path())) {
           disk_interface_->RemoveFile((*ni)->path());
+        }
       }
-      if (has_depfile)
-        disk_interface_->RemoveFile((*i)->EvaluateDepFile());
+      if (!depfile.empty())
+        disk_interface_->RemoveFile(depfile);
     }
   }
 }
@@ -744,8 +772,10 @@ bool Builder::StartEdge(Edge* edge, string* err) {
 
   // Create response file, if needed
   // XXX: this may also block; do we care?
-  if (edge->HasRspFile()) {
-    if (!disk_interface_->WriteFile(edge->GetRspFile(), edge->GetRspFileContent()))
+  string rspfile = edge->GetBinding("rspfile");
+  if (!rspfile.empty()) {
+    string content = edge->GetBinding("rspfile_content");
+    if (!disk_interface_->WriteFile(rspfile, content))
       return false;
   }
 
@@ -763,7 +793,7 @@ void Builder::FinishEdge(Edge* edge, bool success, const string& output) {
   TimeStamp restat_mtime = 0;
 
   if (success) {
-    if (edge->rule().restat() && !config_.dry_run) {
+    if (edge->GetBindingBool("restat") && !config_.dry_run) {
       bool node_cleaned = false;
 
       for (vector<Node*>::iterator i = edge->outputs_.begin();
@@ -788,8 +818,9 @@ void Builder::FinishEdge(Edge* edge, bool success, const string& output) {
             restat_mtime = input_mtime;
         }
 
-        if (restat_mtime != 0 && !edge->rule().depfile().empty()) {
-          TimeStamp depfile_mtime = disk_interface_->Stat(edge->EvaluateDepFile());
+        string depfile = edge->GetBinding("depfile");
+        if (restat_mtime != 0 && !depfile.empty()) {
+          TimeStamp depfile_mtime = disk_interface_->Stat(depfile);
           if (depfile_mtime > restat_mtime)
             restat_mtime = depfile_mtime;
         }
@@ -800,9 +831,10 @@ void Builder::FinishEdge(Edge* edge, bool success, const string& output) {
       }
     }
 
-    // delete the response file on success (if exists)
-    if (edge->HasRspFile())
-      disk_interface_->RemoveFile(edge->GetRspFile());
+    // Delete the response file on success (if exists)
+    string rspfile = edge->GetBinding("rspfile");
+    if (!rspfile.empty())
+      disk_interface_->RemoveFile(rspfile);
 
     plan_.EdgeFinished(edge);
   }

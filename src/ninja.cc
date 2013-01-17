@@ -173,17 +173,10 @@ bool RebuildManifest(Builder* builder, const char* input_file, string* err) {
   return node->dirty();
 }
 
-bool CollectTargetsFromArgs(State* state, int argc, char* argv[],
-                            vector<Node*>* targets, string* err) {
-  if (argc == 0) {
-    *targets = state->DefaultNodes(err);
-    return err->empty();
-  }
-
-  for (int i = 0; i < argc; ++i) {
-    string path = argv[i];
+Node* CollectTarget(State* state, const char* cpath, string* err) {
+  string path = cpath;
     if (!CanonicalizePath(&path, err))
-      return false;
+    return NULL;
 
     // Special syntax: "foo.cc^" means "the first output of foo.cc".
     bool first_dependent = false;
@@ -197,7 +190,7 @@ bool CollectTargetsFromArgs(State* state, int argc, char* argv[],
       if (first_dependent) {
         if (node->out_edges().empty()) {
           *err = "'" + path + "' has no out edge";
-          return false;
+        return NULL;
         }
         Edge* edge = node->out_edges()[0];
         if (edge->outputs_.empty()) {
@@ -206,7 +199,7 @@ bool CollectTargetsFromArgs(State* state, int argc, char* argv[],
         }
         node = edge->outputs_[0];
       }
-      targets->push_back(node);
+    return node;
     } else {
       *err = "unknown target '" + path + "'";
 
@@ -220,8 +213,22 @@ bool CollectTargetsFromArgs(State* state, int argc, char* argv[],
           *err += ", did you mean '" + suggestion->path() + "'?";
         }
       }
+    return NULL;
+  }
+}
+
+bool CollectTargetsFromArgs(State* state, int argc, char* argv[],
+                            vector<Node*>* targets, string* err) {
+  if (argc == 0) {
+    *targets = state->DefaultNodes(err);
+    return err->empty();
+  }
+
+  for (int i = 0; i < argc; ++i) {
+    Node* node = CollectTarget(state, argv[i], err);
+    if (node == NULL)
       return false;
-    }
+    targets->push_back(node);
   }
   return true;
 }
@@ -249,19 +256,14 @@ int ToolQuery(Globals* globals, int argc, char* argv[]) {
     return 1;
   }
   for (int i = 0; i < argc; ++i) {
-    Node* node = globals->state->LookupNode(argv[i]);
+    string err;
+    Node* node = CollectTarget(globals->state, argv[i], &err);
     if (!node) {
-      Node* suggestion = globals->state->SpellcheckNode(argv[i]);
-      if (suggestion) {
-        printf("%s unknown, did you mean %s?\n",
-               argv[i], suggestion->path().c_str());
-      } else {
-        printf("%s unknown\n", argv[i]);
-      }
+      Error("%s", err.c_str());
       return 1;
     }
 
-    printf("%s:\n", argv[i]);
+    printf("%s:\n", node->path().c_str());
     if (Edge* edge = node->in_edge()) {
       printf("  input: %s\n", edge->rule_->name().c_str());
       for (int in = 0; in < (int)edge->inputs_.size(); in++) {
@@ -413,23 +415,6 @@ int ToolTargets(Globals* globals, int argc, char* argv[]) {
   }
 }
 
-int ToolRules(Globals* globals, int argc, char* /* argv */[]) {
-  for (map<string, const Rule*>::iterator i = globals->state->rules_.begin();
-       i != globals->state->rules_.end(); ++i) {
-    if (i->second->description().empty()) {
-      printf("%s\n", i->first.c_str());
-    } else {
-      printf("%s: %s\n",
-             i->first.c_str(),
-             // XXX I changed it such that we don't have an easy way
-             // to get the source text anymore, so this output is
-             // unsatisfactory.  How useful is this command, anyway?
-             i->second->description().Serialize().c_str());
-    }
-  }
-  return 0;
-}
-
 void PrintCommands(Edge* edge, set<Edge*>* seen) {
   if (!edge)
     return;
@@ -557,8 +542,6 @@ int ChooseTool(const string& tool_name, const Tool** tool_out) {
       Tool::RUN_AFTER_LOAD, ToolGraph },
     { "query", "show inputs/outputs for a path",
       Tool::RUN_AFTER_LOAD, ToolQuery },
-    { "rules",    "list all rules",
-      Tool::RUN_AFTER_LOAD, ToolRules },
     { "targets",  "list targets by their rule or depth in the DAG",
       Tool::RUN_AFTER_LOAD, ToolTargets },
     { "urtle", NULL,
@@ -690,6 +673,9 @@ int RunBuild(Builder* builder, int argc, char** argv) {
 
   if (!builder->Build(&err)) {
     printf("ninja: build stopped: %s.\n", err.c_str());
+    if (err.find("interrupted by user") != string::npos) {
+    	return 2;
+    }
     return 1;
   }
 
@@ -833,7 +819,6 @@ int NinjaMain(int argc, char** argv) {
   bool rebuilt_manifest = false;
 
 reload:
-  RealDiskInterface disk_interface;
   RealFileReader file_reader;
   ManifestParser parser(globals.state, &file_reader);
   string err;
@@ -847,6 +832,10 @@ reload:
 
   if (tool && tool->when == Tool::RUN_AFTER_LOAD)
     return tool->func(&globals, argc, argv);
+
+  RealDiskInterface disk_interface;
+  if (!OpenLog(&globals.build_log, &globals, &disk_interface))
+    return 1;
 
   if (!rebuilt_manifest) { // Don't get caught in an infinite loop by a rebuild
                            // target that is never up to date.

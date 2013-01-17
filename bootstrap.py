@@ -31,6 +31,10 @@ parser.add_option('--verbose', action='store_true',
                   help='enable verbose build',)
 parser.add_option('--x64', action='store_true',
                   help='force 64-bit build (Windows)',)
+# TODO: make this --platform to match configure.py.
+parser.add_option('--windows', action='store_true',
+                  help='force native Windows build (when using Cygwin Python)',
+                  default=sys.platform.startswith('win32'))
 (options, conf_args) = parser.parse_args()
 
 def run(*args, **kwargs):
@@ -66,7 +70,7 @@ for src in glob.glob('src/*.cc'):
     if filename == 'browse.cc':  # Depends on generated header.
         continue
 
-    if sys.platform.startswith('win32'):
+    if options.windows:
         if src.endswith('-posix.cc'):
             continue
     else:
@@ -75,7 +79,7 @@ for src in glob.glob('src/*.cc'):
 
     sources.append(src)
 
-if sys.platform.startswith('win32'):
+if options.windows:
     sources.append('src/getopt.c')
 
 vcdir = os.environ.get('VCINSTALLDIR')
@@ -90,14 +94,15 @@ else:
     cflags.extend(['-Wno-deprecated',
                    '-DNINJA_PYTHON="' + sys.executable + '"',
                    '-DNINJA_BOOTSTRAP'])
-    if sys.platform.startswith('win32'):
+    if options.windows:
         cflags.append('-D_WIN32_WINNT=0x0501')
+        conf_args.append("--platform=mingw")
     if options.x64:
         cflags.append('-m64')
 args.extend(cflags)
 args.extend(ldflags)
 binary = 'ninja.bootstrap'
-if sys.platform.startswith('win32'):
+if options.windows:
     binary = 'ninja.bootstrap.exe'
 args.extend(sources)
 if vcdir:
@@ -118,7 +123,7 @@ verbose = []
 if options.verbose:
     verbose = ['-v']
 
-if sys.platform.startswith('win32'):
+if options.windows:
     print('Building ninja using itself...')
     run([sys.executable, 'configure.py', '--with-ninja=%s' % binary] +
         conf_args)
