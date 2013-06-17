@@ -167,6 +167,7 @@ struct Builder {
   /// Update status ninja logs following a command termination.
   /// @return false if the build can not proceed further due to a fatal error.
   bool FinishCommand(CommandRunner::Result* result, string* err);
+  bool ConsiderRestartingCommand(CommandRunner::Result* result, string* err);
 
   /// Used for tests.
   void SetBuildLog(BuildLog* log) {
@@ -200,6 +201,7 @@ struct BuildStatus {
   void BuildEdgeFinished(Edge* edge, bool success, const string& output,
                          int* start_time, int* end_time);
   void BuildFinished();
+  void BuildEdgeShouldRestart();
 
   /// Format the progress status string by replacing the placeholders.
   /// See the user manual for more information about the available
@@ -215,7 +217,7 @@ struct BuildStatus {
   /// Time the build started.
   int64_t start_time_millis_;
 
-  int started_edges_, finished_edges_, total_edges_;
+  int started_edges_, finished_edges_, restarted_edges_, total_edges_;
 
   /// Map of running edge to time the edge started running.
   typedef map<Edge*, int> RunningEdgeMap;
