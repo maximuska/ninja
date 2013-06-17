@@ -74,7 +74,7 @@ bool DryRunCommandRunner::WaitForCommand(Result* result) {
 BuildStatus::BuildStatus(const BuildConfig& config)
     : config_(config),
       start_time_millis_(GetTimeMillis()),
-      started_edges_(0), finished_edges_(0), total_edges_(0),
+      started_edges_(0), finished_edges_(0), restarted_edges_(0), total_edges_(0),
       progress_status_format_(NULL),
       overall_rate_(), current_rate_(config.parallelism) {
 
@@ -100,6 +100,11 @@ void BuildStatus::BuildEdgeStarted(Edge* edge) {
 
   if (edge->use_console())
     printer_.SetConsoleLocked(true);
+}
+
+void BuildStatus::BuildEdgeShouldRestart()
+{
+  ++restarted_edges_;
 }
 
 void BuildStatus::BuildEdgeFinished(Edge* edge,
@@ -174,9 +179,9 @@ string BuildStatus::FormatProgressStatus(
         out += buf;
         break;
 
-        // Total edges.
+        // Total edges. Since same edges are executed several times, fixing the 'total'.
       case 't':
-        snprintf(buf, sizeof(buf), "%d", total_edges_);
+        snprintf(buf, sizeof(buf), "%d", total_edges_ + restarted_edges_);
         out += buf;
         break;
 
@@ -188,7 +193,7 @@ string BuildStatus::FormatProgressStatus(
 
         // Unstarted edges.
       case 'u':
-        snprintf(buf, sizeof(buf), "%d", total_edges_ - started_edges_);
+        snprintf(buf, sizeof(buf), "%d", total_edges_ + restarted_edges_ - started_edges_);
         out += buf;
         break;
 
@@ -592,6 +597,40 @@ bool Builder::AlreadyUpToDate() const {
   return !plan_.more_to_do();
 }
 
+bool Builder::ConsiderRestartingCommand(CommandRunner::Result* res, string* err) {
+  Edge* edge = res->edge;
+
+  if (!scan_.RecomputeDirty(edge, err)) {
+    assert(!err->empty());
+    return false;
+  }
+
+  // Re-add all inputs, dirty and clean to check for dependencies loops
+  //  which could be created with the loading of the updated .dep file.
+  for (vector<Node*>::iterator input = edge->inputs_.begin();
+       input != edge->inputs_.end(); ++input) {
+    if (!plan_.AddTarget(*input, err)) {
+      if (!err->empty()) {
+        return false;
+      }
+    }
+  }
+
+  // Despite re-reading the .dep file, we are clean? Don't restart.
+  if (edge->AllInputsReady()) {
+    return false;
+  }
+
+  // Number of plan edges could have changed. Update the number of reported and
+  // restarted plan edges.
+  status_->PlanHasTotalEdges(plan_.command_edge_count());
+  status_->BuildEdgeShouldRestart();
+
+  EXPLAIN("Dirty deps discovered, restarting rule creating output %s", edge->outputs_[0]->path().c_str());
+
+  return true;
+}
+
 bool Builder::Build(string* err) {
   assert(!AlreadyUpToDate());
 
@@ -725,7 +764,11 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
   vector<Node*> deps_nodes;
   string deps_type = edge->GetBinding("deps");
   const string deps_prefix = edge->GetBinding("msvc_deps_prefix");
-  if (!deps_type.empty()) {
+  if (!deps_type.empty() && !config_.dry_run) {
+    assert(edge->outputs_.size() == 1 && "should have been rejected by parser");
+    Node* out = edge->outputs_[0];
+    TimeStamp deps_mtime = disk_interface_->Stat(out->path());
+
     string extract_err;
     if (!ExtractDeps(result, deps_type, deps_prefix, &deps_nodes,
                      &extract_err) &&
@@ -735,6 +778,12 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
       result->output.append(extract_err);
       result->status = ExitFailure;
     }
+
+    if (result->success())
+      if (!scan_.deps_log()->RecordDeps(out, deps_mtime, deps_nodes)) {
+        *err = string("Error writing to deps log: ") + strerror(errno);
+        return false;
+      }
   }
 
   int start_time, end_time;
@@ -744,6 +793,16 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
   // The rest of this function only applies to successful commands.
   if (!result->success())
     return true;
+
+  if (edge->GetBindingBool("reload")) {
+    // Reload target dependencies, and return keeping the target in the pool if
+    //  new (dirty) dependencies were discovered.
+    if (ConsiderRestartingCommand(result, err))
+      return true;
+
+    if (!err->empty())
+      return false;
+  }
 
   // Restat the edge outputs, if necessary.
   TimeStamp restat_mtime = 0;
@@ -800,15 +859,6 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
     }
   }
 
-  if (!deps_type.empty() && !config_.dry_run) {
-    assert(edge->outputs_.size() == 1 && "should have been rejected by parser");
-    Node* out = edge->outputs_[0];
-    TimeStamp deps_mtime = disk_interface_->Stat(out->path());
-    if (!scan_.deps_log()->RecordDeps(out, deps_mtime, deps_nodes)) {
-      *err = string("Error writing to deps log: ") + strerror(errno);
-      return false;
-    }
-  }
   return true;
 }
 
