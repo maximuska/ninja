@@ -163,7 +163,8 @@ struct Builder {
   bool Build(string* err);
 
   bool StartEdge(Edge* edge, string* err);
-  void FinishCommand(CommandRunner::Result* result);
+  bool FinishCommand(CommandRunner::Result* result, string* err);
+  bool ConsiderRestartingCommand(CommandRunner::Result* result, string* err);
 
   /// Used for tests.
   void SetBuildLog(BuildLog* log) {
@@ -195,6 +196,7 @@ struct BuildStatus {
   void BuildEdgeStarted(Edge* edge);
   void BuildEdgeFinished(Edge* edge, bool success, const string& output,
                          int* start_time, int* end_time);
+  void BuildEdgeShouldRestart();
   void BuildFinished();
 
   /// Format the progress status string by replacing the placeholders.
@@ -211,7 +213,7 @@ struct BuildStatus {
   /// Time the build started.
   int64_t start_time_millis_;
 
-  int started_edges_, finished_edges_, total_edges_;
+  int started_edges_, finished_edges_, restarted_edges_, total_edges_;
 
   /// Map of running edge to time the edge started running.
   typedef map<Edge*, int> RunningEdgeMap;

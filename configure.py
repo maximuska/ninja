@@ -340,6 +340,7 @@ else:
 n.variable('test_cflags', test_cflags)
 for name in ['build_log_test',
              'build_test',
+             'build_reload_test',
              'clean_test',
              'depfile_parser_test',
              'deps_log_test',

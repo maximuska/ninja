@@ -53,6 +53,7 @@ bool Rule::IsReservedBinding(const string& var) {
       var == "generator" ||
       var == "pool" ||
       var == "restat" ||
+      var == "reload" ||
       var == "rspfile" ||
       var == "rspfile_content";
 }
@@ -103,6 +104,16 @@ bool DependencyScan::RecomputeDirty(Edge* edge, string* err) {
         }
       }
     }
+  }
+
+  // "reload" rules _output_ is also a depfile, which gets erased after being
+  // processed in 'deps' mode, therefore use mtime stored in the deps log to
+  // decide if the outputs are clean.
+  if (!dirty && deps_mtime > 0 && edge->GetBindingBool("reload")) {
+    if (!most_recent_input ||
+        (most_recent_input && deps_mtime >= most_recent_input->mtime()))
+      return true;
+    dirty = true;
   }
 
   // We may also be dirty due to output state: missing outputs, out of
