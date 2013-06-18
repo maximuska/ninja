@@ -104,6 +104,7 @@ struct NinjaMain {
   // The various subcommands, run via "-t XXX".
   int ToolGraph(int argc, char* argv[]);
   int ToolQuery(int argc, char* argv[]);
+  int ToolDeps(int argc, char* argv[]);
   int ToolBrowse(int argc, char* argv[]);
   int ToolMSVC(int argc, char* argv[]);
   int ToolTargets(int argc, char* argv[]);
@@ -437,6 +438,42 @@ int ToolTargetsList(State* state) {
   return 0;
 }
 
+int NinjaMain::ToolDeps(int argc, char** argv) {
+  // Since this runs RUN_AFTER_LOAD, -C will already have chdir()'d to the right
+  // directory.
+  RealDiskInterface disk_interface;
+  const string build_dir = state_.bindings_.LookupVariable("builddir");
+
+  if (!OpenDepsLog())
+    return 1;
+
+  vector<Node*> nodes;
+  if (argc == 0) {
+    nodes = deps_log_.nodes();
+  } else {
+    string err;
+    if (!CollectTargetsFromArgs(argc, argv, &nodes, &err)) {
+      Error("%s", err.c_str());
+      return 1;
+    }
+  }
+
+  for (vector<Node*>::iterator it = nodes.begin(), end = nodes.end(); it != end;
+       ++it) {
+    DepsLog::Deps* deps = deps_log_.GetDeps(*it);
+    if (!deps) {
+      printf("%s: deps not found\n", (*it)->path().c_str());
+      continue;
+    }
+    printf("%s: mtime %d, #deps %d\n", (*it)->path().c_str(), deps->mtime,
+           deps->node_count);
+    for (int i = 0; i < deps->node_count; ++i)
+      printf("    %s\n", deps->nodes[i]->path().c_str());
+  }
+
+  return 0;
+}
+
 int NinjaMain::ToolTargets(int argc, char* argv[]) {
   int depth = 1;
   if (argc >= 1) {
@@ -644,6 +681,8 @@ const Tool* ChooseTool(const string& tool_name) {
       Tool::RUN_AFTER_LOAD, &NinjaMain::ToolClean },
     { "commands", "list all commands required to rebuild given targets",
       Tool::RUN_AFTER_LOAD, &NinjaMain::ToolCommands },
+    { "deps", "show dependencies stored in the deps log",
+      Tool::RUN_AFTER_LOAD, &NinjaMain::ToolDeps },
     { "graph", "output graphviz dot file for targets",
       Tool::RUN_AFTER_LOAD, &NinjaMain::ToolGraph },
     { "query", "show inputs/outputs for a path",
@@ -745,6 +784,7 @@ bool NinjaMain::OpenDepsLog() {
   if (!build_dir_.empty())
     path = build_dir_ + "/" + path;
 
+  printf("Loading deps from: %s\n", path.c_str());
   string err;
   if (!deps_log_.Load(path, &state_, &err)) {
     Error("loading deps log %s: %s", path.c_str(), err.c_str());
@@ -974,11 +1014,13 @@ int real_main(int argc, char** argv) {
       return 1;
     }
 
-    if (options.tool && options.tool->when == Tool::RUN_AFTER_LOAD)
-      return (ninja.*options.tool->func)(argc, argv);
-
     if (!ninja.EnsureBuildDirExists())
       return 1;
+
+    if (options.tool && options.tool->when == Tool::RUN_AFTER_LOAD) {
+      config.dry_run = true;
+      return (ninja.*options.tool->func)(argc, argv);
+    }
 
     if (!ninja.OpenBuildLog() || !ninja.OpenDepsLog())
       return 1;
