@@ -446,6 +446,7 @@ void Plan::CleanNode(DependencyScan* scan, Node* node) {
 
       // If we cleaned all outputs, mark the node as not wanted.
       if (all_outputs_clean) {
+        (*ei)->Dump("Cleaned by restat: ");
         want_i->second = false;
         --wanted_edges_;
         if (!(*ei)->is_phony())
