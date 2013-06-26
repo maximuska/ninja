@@ -774,8 +774,10 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
       result->status = ExitFailure;
     }
 
-    if (result->success())
+    if (result->success()) {
+      //edge->Dump("Finished edge, calling RecordDeps ");
       scan_.deps_log()->RecordDeps(out, deps_mtime, deps_nodes);
+    }
   }
 
   int start_time, end_time;

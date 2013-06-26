@@ -116,22 +116,41 @@ bool DepsLog::RecordDeps(Node* node, TimeStamp mtime,
   }
 
   // Don't write anything if there's no new info.
-  if (!made_change)
+  if (!made_change) {
+    printf("RecordDeps: no changes to record for: %s\n", node->path().c_str());
     return true;
+  }
 
   // Update on-disk representation.
   uint16_t size = 4 * (1 + 1 + (uint16_t)node_count);
+  printf("RD: record for: '%s', @%ld, deps no: %d, size: %d\n", node->path().c_str(), ftell(file_), node_count, size);
+  assert(size != 0 && (int)size == (4 * (1 + 1 + node_count)));
   size |= 0x8000;  // Deps record: set high bit.
-  fwrite(&size, 2, 1, file_);
+  if (fwrite(&size, 2, 1, file_) != 1) {
+    perror("fwrite(&size, 2, 1, file_) != 1");
+    assert(false);
+  }
   int id = node->id();
-  fwrite(&id, 4, 1, file_);
+  if (fwrite(&id, 4, 1, file_) != 1) {
+    perror("fwrite(&id, 4, 1, file_) != 1");
+    assert(false);
+  }
   int timestamp = mtime;
-  fwrite(&timestamp, 4, 1, file_);
+  if (fwrite(&timestamp, 4, 1, file_) != 1) {
+    perror("fwrite(&timestamp, 4, 1, file_) != 1");
+    assert(false);
+  }
   for (int i = 0; i < node_count; ++i) {
     id = nodes[i]->id();
-    fwrite(&id, 4, 1, file_);
+    if(fwrite(&id, 4, 1, file_) != 1) {
+      perror("fwrite(&id, 4, 1, file_) != 1");
+      assert(false);
+    }
   }
-  fflush(file_);
+  if (fflush(file_) != 0) {
+    perror("fflush failed");
+    assert(false);
+  }
 
   // Update in-memory representation.
   Deps* deps = new Deps(mtime, node_count);
@@ -191,6 +210,7 @@ bool DepsLog::Load(const string& path, State* state, string* err) {
 
     if (fread(buf, size, 1, f) < 1) {
       read_failed = true;
+      printf("** fread of %d bytes @%ld has failed, is_deps: %d, err: %d\n", size, offset, is_deps, errno);
       break;
     }
 
@@ -203,6 +223,7 @@ bool DepsLog::Load(const string& path, State* state, string* err) {
       int deps_count = (size / 4) - 2;
 
       Deps* deps = new Deps(mtime, deps_count);
+      printf("** dep id: %d, count: %d\n", out_id, deps_count);
       for (int i = 0; i < deps_count; ++i) {
         assert(deps_data[i] < (int)nodes_.size());
         assert(nodes_[deps_data[i]]);
@@ -230,6 +251,10 @@ bool DepsLog::Load(const string& path, State* state, string* err) {
       *err = "premature end of file";
     }
     fclose(f);
+
+    //DEBUG
+    printf("Current offset: %ld, not recovering, - debug it!", offset);
+    return false;
 
     if (!Truncate(path.c_str(), offset, err))
       return false;
@@ -324,9 +349,19 @@ bool DepsLog::UpdateDeps(int out_id, Deps* deps) {
 
 bool DepsLog::RecordId(Node* node) {
   uint16_t size = (uint16_t)node->path().size();
-  fwrite(&size, 2, 1, file_);
-  fwrite(node->path().data(), node->path().size(), 1, file_);
-  fflush(file_);
+  if (fwrite(&size, 2, 1, file_) != 1) {
+    node->Dump("DepsLog::RecordId failed for node ");
+    perror("fwrite(&size, 2, 1, file_ failed");
+    assert(false);
+  }
+  if (fwrite(node->path().data(), node->path().size(), 1, file_) != 1) {
+    node->Dump("DepsLog::RecordId failed for node ");
+    printf("fwrite(node data, %zd, 1, file_ failed, errno: %d", node->path().size(), errno);
+    assert(false);
+  }
+  if (fflush(file_) != 0) {
+    perror("fflush failed");
+  }
 
   node->set_id(nodes_.size());
   nodes_.push_back(node);
