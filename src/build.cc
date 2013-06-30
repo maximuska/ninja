@@ -429,8 +429,7 @@ void Plan::CleanNode(DependencyScan* scan, Node* node) {
         if (!(*ni)->dirty())
           continue;
 
-        if (scan->RecomputeOutputDirty(*ei, most_recent_input, 0,
-                                       command, *ni)) {
+        if (scan->RecomputeOutputDirty(*ei, most_recent_input, command, *ni)) {
           all_outputs_clean = false;
         } else {
           CleanNode(scan, *ni);
