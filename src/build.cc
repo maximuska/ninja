@@ -683,8 +683,8 @@ bool Builder::Build(string* err) {
 
       --pending_commands;
       if (!FinishCommand(&result, err)) {
-          status_->BuildFinished();
-          return false;
+        status_->BuildFinished();
+        return false;
       }
 
       if (!result.success()) {
@@ -775,8 +775,10 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
     }
 
     if (result->success()) {
-      //edge->Dump("Finished edge, calling RecordDeps ");
-      scan_.deps_log()->RecordDeps(out, deps_mtime, deps_nodes);
+      if (!scan_.deps_log()->RecordDeps(out, deps_mtime, deps_nodes)) {
+        *err = string("Error writing to deps log: ") + strerror(errno);
+        return false;
+      }
     }
   }
 
