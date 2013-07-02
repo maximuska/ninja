@@ -1,0 +1,29 @@
+delay = 20
+
+rule echos
+    command = for x in `seq $delay` ; do echo $$x; sleep 0.1; done
+    description = [ECHOS-$delay] $out
+rule echos2
+    command = for x in `seq $delay` ; do echo -n "Running $$x\r"; sleep 0.1; done && echo ""
+    description = [ECHOS-$delay] $out
+rule false
+    command = for x in `seq $delay` ; do echo $$x; sleep 0.1; done && false
+    description = [FALSE] $out
+rule sleep
+    command = sleep $delay
+    description = [SLEEP-$delay] $out
+
+build e1: echos
+build e2: echos e1
+    delay = 10
+build e3: sleep
+    description = SLEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE$
+                    PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIING
+    delay = 10
+build e4: false e1
+build e5: sleep
+    delay = 20
+build e6: echos2
+    delay = 20
+
+default e1
