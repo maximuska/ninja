@@ -38,9 +38,17 @@ struct LinePrinter {
   /// Prints a string on a new line, not overprinting previous output.
   void PrintOnNewLine(const string& to_print);
 
+  /// Prints the string at current cursor position as-is, not overprinting
+  /// previous output and flushes the stdout.
+  void PrintRaw(const string& to_print);
+
   /// Lock or unlock the console.  Any output sent to the LinePrinter while the
   /// console is locked will not be printed until it is unlocked.
   void SetConsoleLocked(bool locked);
+
+  // Allows checking if the console is locked to refrain from printing status updates
+  // (which would be buffered and not displayed).
+  bool GetConsoleLocked() { return console_locked_; }
 
  private:
   /// Whether we can do fancy terminal control codes.
