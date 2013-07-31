@@ -36,6 +36,9 @@ struct Edge;
 struct Node;
 struct State;
 
+const uint64_t kStillRunningDelayMsec = 3000;
+const int kStillRunningFPS = 4;
+
 /// Plan stores the state of a build plan: what we intend to build,
 /// which steps we're ready to execute.
 struct Plan {
@@ -49,6 +52,9 @@ struct Plan {
   // Pop a ready edge off the queue of edges to build.
   // Returns NULL if there's no work to do.
   Edge* FindWork();
+
+  // Returns true if there are edges waiting to run now.
+  bool HasWork() const { return !ready_.empty(); }
 
   /// Returns true if there's more work to be done.
   bool more_to_do() const { return wanted_edges_; }
@@ -116,6 +122,9 @@ struct CommandRunner {
   /// Wait for a command to complete, or return false if interrupted.
   virtual bool WaitForCommand(Result* result) = 0;
 
+  /// Return command output collected so far
+  virtual void PeekCommandOutput(Edge* edge, string* out) {}
+
   virtual vector<Edge*> GetActiveEdges() { return vector<Edge*>(); }
   virtual void Abort() {}
 };
@@ -168,6 +177,8 @@ struct Builder {
   /// @return false if the build can not proceed further due to a fatal error.
   bool FinishCommand(CommandRunner::Result* result, string* err);
 
+  void ReportProgress(void);
+
   /// Used for tests.
   void SetBuildLog(BuildLog* log) {
     scan_.set_build_log(log);
@@ -198,6 +209,8 @@ struct BuildStatus {
   void BuildEdgeStarted(Edge* edge);
   void BuildEdgeFinished(Edge* edge, bool success, const string& output,
                          int* start_time, int* end_time);
+  void BuildEdgeStillRunning(Edge* edge);
+  void BuildEdgeRunningSolo(Edge* edge, const string& output);
   void BuildFinished();
 
   /// Format the progress status string by replacing the placeholders.
@@ -207,7 +220,9 @@ struct BuildStatus {
   string FormatProgressStatus(const char* progress_status_format) const;
 
  private:
-  void PrintStatus(Edge* edge);
+  void PrintStatus(Edge* edge, const char* trailer = "");
+  void RestartStillRunningDelay();
+  void BuildEdgeFinishedSolo(Edge* edge, bool success, const string& output);
 
   const BuildConfig& config_;
 
@@ -222,6 +237,14 @@ struct BuildStatus {
 
   /// Prints progress output.
   LinePrinter printer_;
+
+  /// Timestamp when the next frame with the 'still running' spinner should be
+  /// displayed. Reset when regular edge start/end notifications are printed.
+  int64_t next_progress_update_at_;
+
+  /// Counts how much was printed so far for an edge running solo.
+  /// Non-zero means that only one edge can be running.
+  size_t solo_bytes_printed_;
 
   /// The custom progress status format to use.
   const char* progress_status_format_;

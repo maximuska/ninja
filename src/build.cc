@@ -74,6 +74,8 @@ BuildStatus::BuildStatus(const BuildConfig& config)
     : config_(config),
       start_time_millis_(GetTimeMillis()),
       started_edges_(0), finished_edges_(0), total_edges_(0),
+      next_progress_update_at_(0),
+      solo_bytes_printed_(0),
       progress_status_format_(NULL),
       overall_rate_(), current_rate_(config.parallelism) {
 
@@ -95,6 +97,10 @@ void BuildStatus::BuildEdgeStarted(Edge* edge) {
   running_edges_.insert(make_pair(edge, start_time));
   ++started_edges_;
 
+  // Edge running solo is supposed to keep running alone.
+  assert(solo_bytes_printed_ == 0);
+
+  RestartStillRunningDelay();
   PrintStatus(edge);
 }
 
@@ -113,6 +119,13 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
 
   if (config_.verbosity == BuildConfig::QUIET)
     return;
+
+  RestartStillRunningDelay();
+  if (solo_bytes_printed_ > 0) {
+    // Special treatment to edges status
+    BuildEdgeFinishedSolo(edge, success, output);
+    return;
+  }
 
   if (printer_.is_smart_terminal())
     PrintStatus(edge);
@@ -141,6 +154,57 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
       final_output = output;
     printer_.PrintOnNewLine(final_output);
   }
+}
+
+void BuildStatus::BuildEdgeStillRunning(Edge* edge)
+{
+  if (config_.verbosity == BuildConfig::QUIET || !printer_.is_smart_terminal())
+    return;
+
+  int64_t now = GetTimeMillis();
+  if (next_progress_update_at_ > now)
+    return;
+
+  static int ctr = 0;
+  char status[32];
+  snprintf(status, sizeof(status), " (still running.. %c)", "/-\\|"[ctr++ % 4]);
+
+  PrintStatus(edge, status);
+  next_progress_update_at_ = now + 1000/kStillRunningFPS;
+}
+
+void BuildStatus::RestartStillRunningDelay()
+{
+  next_progress_update_at_ = GetTimeMillis() + kStillRunningDelayMsec;
+}
+
+void BuildStatus::BuildEdgeRunningSolo(Edge* edge, const string& output)
+{
+  if (config_.verbosity == BuildConfig::QUIET || !printer_.is_smart_terminal())
+    return;
+
+  if (output.size() > solo_bytes_printed_) {
+    if (solo_bytes_printed_ == 0) {
+      // Print edge description before starting to print its output
+      PrintStatus(edge, "\n");
+    }
+    printer_.PrintRaw(output.substr(solo_bytes_printed_));
+    solo_bytes_printed_ = output.size();
+  }
+}
+
+void BuildStatus::BuildEdgeFinishedSolo(Edge* edge,
+                                        bool success,
+                                        const string& output)
+{
+  // Print reminders of the output, if any
+  BuildEdgeRunningSolo(edge, output);
+
+  // Print the command that has failed
+  if (!success)
+    printer_.PrintOnNewLine("^^FAILED: " + edge->EvaluateCommand() + "\n");
+
+  solo_bytes_printed_ = 0;
 }
 
 void BuildStatus::BuildFinished() {
@@ -230,7 +294,7 @@ string BuildStatus::FormatProgressStatus(
   return out;
 }
 
-void BuildStatus::PrintStatus(Edge* edge) {
+void BuildStatus::PrintStatus(Edge* edge, const char* trailer) {
   if (config_.verbosity == BuildConfig::QUIET)
     return;
 
@@ -244,7 +308,7 @@ void BuildStatus::PrintStatus(Edge* edge) {
     overall_rate_.Restart();
     current_rate_.Restart();
   }
-  to_print = FormatProgressStatus(progress_status_format_) + to_print;
+  to_print = FormatProgressStatus(progress_status_format_) + to_print + trailer;
 
   printer_.Print(to_print,
                  force_full_command ? LinePrinter::FULL : LinePrinter::ELIDE);
@@ -467,6 +531,7 @@ struct RealCommandRunner : public CommandRunner {
   virtual bool CanRunMore();
   virtual bool StartCommand(Edge* edge);
   virtual bool WaitForCommand(Result* result);
+  virtual void PeekCommandOutput(Edge* edge, string* out);
   virtual vector<Edge*> GetActiveEdges();
   virtual void Abort();
 
@@ -493,6 +558,16 @@ bool RealCommandRunner::CanRunMore() {
         || GetLoadAverage() < config_.max_load_average);
 }
 
+void RealCommandRunner::PeekCommandOutput(Edge* edge, string* out)
+{
+  // Note: search linearly, but as long this is only invoked when number of
+  // edges == 1, nothing better is necessary.
+  for (map<Subprocess*, Edge*>::iterator i = subproc_to_edge_.begin();
+       i != subproc_to_edge_.end(); ++i)
+    if (i->second == edge)
+      *out = i->first->GetOutput();
+}
+
 bool RealCommandRunner::StartCommand(Edge* edge) {
   string command = edge->EvaluateCommand();
   Subprocess* subproc = subprocs_.Add(command);
@@ -509,6 +584,9 @@ bool RealCommandRunner::WaitForCommand(Result* result) {
     bool interrupted = subprocs_.DoWork();
     if (interrupted)
       return false;
+
+    result->status = ExitTimeout;
+    return true;
   }
 
   result->status = subproc->Finish();
@@ -640,6 +718,11 @@ bool Builder::Build(string* err) {
         status_->BuildFinished();
         *err = "interrupted by user";
         return false;
+      }
+
+      if (result.status == ExitTimeout) {
+        ReportProgress();
+        continue;
       }
 
       --pending_commands;
@@ -798,6 +881,26 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
     }
   }
   return true;
+}
+
+void Builder::ReportProgress(void)
+{
+  vector<Edge*> active_edges = command_runner_->GetActiveEdges();
+  if (active_edges.size() < 1)
+    return;
+
+  Edge* edge = active_edges[0];
+  if (active_edges.size() == 1 && !plan_.HasWork()) {
+    // If a command is running 'solo' AND produces some output, start printing
+    // its output in the real time w/o waiting for its completion.
+    string output;
+    command_runner_->PeekCommandOutput(edge, &output);
+    if (output.size()) {
+      status_->BuildEdgeRunningSolo(edge, output);
+      return;
+    }
+  }
+  status_->BuildEdgeStillRunning(edge);
 }
 
 bool Builder::ExtractDeps(CommandRunner::Result* result,
